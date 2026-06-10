@@ -51,6 +51,18 @@ fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
 
+/// 양식 개체 타입 → 표시 문자열 (rhwp `form_type_to_str`와 동일 표기).
+fn form_type_str(ft: rhwp::model::control::FormType) -> &'static str {
+    use rhwp::model::control::FormType;
+    match ft {
+        FormType::PushButton => "PushButton",
+        FormType::CheckBox => "CheckBox",
+        FormType::RadioButton => "RadioButton",
+        FormType::ComboBox => "ComboBox",
+        FormType::Edit => "Edit",
+    }
+}
+
 // ─── 파라미터 구조체 ──────────────────────────────────────────
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -275,6 +287,54 @@ pub struct SetTableColumnWidthsParams {
     pub control: usize,
     /// 열별 폭 목록 (HWPUNIT, 길이는 표의 열 수와 같아야 함)
     pub widths: Vec<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct FieldByNameParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 필드(누름틀) 이름
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetFieldValueParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 필드(누름틀) 이름
+    pub name: String,
+    /// 설정할 값 (필드 범위의 기존 텍스트를 대체)
+    pub value: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct FormAtParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+    /// 문단 인덱스 (0-기반)
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값)
+    pub control: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetFormValueParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+    /// 문단 인덱스 (0-기반)
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값)
+    pub control: usize,
+    /// 체크 상태 (CheckBox/RadioButton: 0=해제, 1=선택)
+    pub value: Option<i32>,
+    /// 텍스트 내용 (ComboBox 선택값 / Edit 입력값)
+    pub text: Option<String>,
+    /// 캡션 (PushButton/CheckBox/RadioButton 라벨)
+    pub caption: Option<String>,
 }
 
 // ─── 도구 구현 ────────────────────────────────────────────────
@@ -769,6 +829,149 @@ impl HangulMcp {
                 .map_err(hwp_err)
         })
     }
+
+    // ── 누름틀(필드) ──
+
+    #[tool(
+        description = "문서의 모든 누름틀(필드)을 목록으로 반환한다: 이름, 종류, 안내문, 현재 값, 위치. 양식 문서를 채우기 전 필드 이름을 파악하는 시작점."
+    )]
+    pub fn list_fields(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
+        self.store
+            .with_session(&p.doc_id, |session| Ok(session.core.get_field_list_json()))
+    }
+
+    #[tool(description = "이름으로 누름틀(필드)의 현재 값을 조회한다.")]
+    pub fn get_field_value(
+        &self,
+        Parameters(p): Parameters<FieldByNameParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            session
+                .core
+                .get_field_value_by_name(&p.name)
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "이름으로 누름틀(필드)의 값을 설정한다 (필드 범위의 기존 텍스트를 대체). 양식 문서 자동 채우기의 핵심 도구. 셀 안의 필드도 지원."
+    )]
+    pub fn set_field_value(
+        &self,
+        Parameters(p): Parameters<SetFieldValueParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            session
+                .core
+                .set_field_value_by_name(&p.name, &p.value)
+                .map_err(hwp_err)
+        })
+    }
+
+    // ── 양식 개체(폼) ──
+
+    #[tool(
+        description = "문서 본문의 모든 양식 개체(버튼/체크박스/라디오/콤보박스/에디트)를 목록으로 반환한다: 위치(section/para/control), 종류, 이름, 값, 캡션, 텍스트. 폼을 채우기 전 좌표를 파악하는 시작점. (표 셀 안의 폼은 미포함)"
+    )]
+    pub fn list_forms(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let mut forms = Vec::new();
+            for (sec_idx, sec) in session.core.document().sections.iter().enumerate() {
+                for (para_idx, para) in sec.paragraphs.iter().enumerate() {
+                    for (ci, ctrl) in para.controls.iter().enumerate() {
+                        if let Control::Form(f) = ctrl {
+                            forms.push(json!({
+                                "section": sec_idx,
+                                "para": para_idx,
+                                "control": ci,
+                                "formType": form_type_str(f.form_type),
+                                "name": f.name.as_str(),
+                                "value": f.value,
+                                "caption": f.caption.as_str(),
+                                "text": f.text.as_str(),
+                            }));
+                        }
+                    }
+                }
+            }
+            Ok(json!({ "forms": forms }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "양식 개체의 현재 값을 조회한다 (종류/이름/값/텍스트/캡션/활성). 위치(section/para/control)는 list_forms로 파악한다."
+    )]
+    pub fn get_form_value(
+        &self,
+        Parameters(p): Parameters<FormAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            session
+                .core
+                .get_form_value_native(p.section, p.para, p.control)
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "양식 개체의 상세 정보를 반환한다: 값/텍스트/캡션 + 크기·색·속성(properties), 콤보박스는 항목 목록 포함."
+    )]
+    pub fn get_form_info(
+        &self,
+        Parameters(p): Parameters<FormAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            session
+                .core
+                .get_form_object_info_native(p.section, p.para, p.control)
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "양식 개체의 값을 설정한다. value(체크 상태 0/1), text(콤보 선택값·에디트 입력값), caption(버튼 라벨) 중 최소 하나를 지정한다. 본문 폼 대상. 위치는 list_forms로 파악한다."
+    )]
+    pub fn set_form_value(
+        &self,
+        Parameters(p): Parameters<SetFormValueParams>,
+    ) -> Result<String, ErrorData> {
+        if p.value.is_none() && p.text.is_none() && p.caption.is_none() {
+            return Err(ErrorData::invalid_params(
+                "value, text, caption 중 최소 하나를 지정해야 한다".to_string(),
+                None,
+            ));
+        }
+        let mut obj = serde_json::Map::new();
+        if let Some(v) = p.value {
+            obj.insert("value".to_string(), json!(v));
+        }
+        if let Some(t) = p.text.as_ref() {
+            obj.insert("text".to_string(), json!(t));
+        }
+        if let Some(c) = p.caption.as_ref() {
+            obj.insert("caption".to_string(), json!(c));
+        }
+        let value_json = serde_json::Value::Object(obj).to_string();
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let result = session
+                .core
+                .set_form_value_native(p.section, p.para, p.control, &value_json)
+                .map_err(hwp_err)?;
+            // 네이티브는 폼이 아니어도 Ok({"ok":false})를 돌려준다 — 이때 Err로 바꿔
+            // dirty가 잘못 서지 않게 한다 (with_session_edit는 Ok일 때만 dirty 설정).
+            if result.contains(r#""ok":true"#) {
+                Ok(result)
+            } else {
+                Err(ErrorData::invalid_params(
+                    format!(
+                        "({}, {}, {}) 위치에 양식 개체 없음",
+                        p.section, p.para, p.control
+                    ),
+                    None,
+                ))
+            }
+        })
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -782,7 +985,10 @@ impl ServerHandler for HangulMcp {
             .with_instructions(
                 "rhwp 기반 HWPX 문서 편집 서버. 워크플로: open_document로 doc_id를 얻고 → \
                  get_structure로 좌표(section/para/control)를 파악하고 → 편집 도구로 수정한 뒤 → \
-                 save_document로 저장한다. 모든 인덱스는 0-기반, 문자 위치는 char 단위다. \
+                 save_document로 저장한다. 양식(누름틀) 문서는 list_fields로 필드 이름을 보고 \
+                 set_field_value(name, value)로 채운다. 양식 개체(버튼/체크박스/콤보박스/에디트)는 \
+                 list_forms로 좌표를 보고 set_form_value(section, para, control, ...)로 채운다. \
+                 모든 인덱스는 0-기반, 문자 위치는 char 단위다. \
                  편집은 메모리에서만 일어나며 save_document 전에는 파일이 바뀌지 않는다.",
             )
     }

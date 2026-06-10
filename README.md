@@ -23,7 +23,7 @@ claude mcp add hangul-mcp -- /Users/stevek/codes/hangul-mcp/target/release/hangu
 
 좌표는 모두 0-기반이고 문자 위치는 char 단위다. rhwp `DocumentCore`와 동일한 좌표계를 쓴다.
 
-## 도구 목록 (20개)
+## 도구 목록 (29개)
 
 **세션**
 
@@ -69,6 +69,35 @@ claude mcp add hangul-mcp -- /Users/stevek/codes/hangul-mcp/target/release/hangu
 | `insert_table_column(doc_id, section, para, control, col, right?)` | 열 삽입 |
 | `delete_table_row(doc_id, section, para, control, row)` | 행 삭제 |
 | `delete_table_column(doc_id, section, para, control, col)` | 열 삭제 |
+| `fit_table_to_page(doc_id, section, para, control)` | 표 폭을 본문 폭 이내로 축소 |
+| `set_table_column_widths(doc_id, section, para, control, widths)` | 열별 폭 직접 지정 |
+
+**누름틀(필드)** — 양식 문서 자동 채우기
+
+| 도구 | 설명 |
+|------|------|
+| `list_fields(doc_id)` | 모든 필드 목록 (이름/종류/안내문/현재 값/위치) |
+| `get_field_value(doc_id, name)` | 이름으로 필드 값 조회 |
+| `set_field_value(doc_id, name, value)` | 이름으로 필드 값 설정 (셀 안 필드 포함) |
+
+**양식 개체(폼)** — 버튼/체크박스/라디오/콤보박스/에디트
+
+| 도구 | 설명 |
+|------|------|
+| `list_forms(doc_id)` | 본문 양식 개체 목록 (위치 `section/para/control`, 종류/이름/값/캡션/텍스트) |
+| `get_form_value(doc_id, section, para, control)` | 양식 개체 값 조회 (종류/값/텍스트/캡션/활성) |
+| `get_form_info(doc_id, section, para, control)` | 상세 정보 (크기·색·속성, 콤보 항목 포함) |
+| `set_form_value(doc_id, section, para, control, value?, text?, caption?)` | 값 설정 (셋 중 최소 하나) |
+
+## 알려진 제약
+
+- **양식 개체 도구는 rhwp의 양식 개체 직렬화기(`serializer/hwpx/form.rs`)를 필요로 한다.**
+  이 path 의존(`../rhwp`)이 해당 writer를 포함한 버전이어야 저장 시 양식 개체가 보존된다.
+  writer가 없는 rhwp 버전으로 빌드하면 양식 개체가 포함된 문서를 저장할 때 개체가 사라진다.
+- **표 셀 안의 양식 개체는 아직 노출하지 않는다.** `list_forms`/`get_form_*`/`set_form_value`는
+  본문 문단 수준의 양식 개체만 다룬다. 셀 내부 양식 개체 설정은 rhwp에 네이티브 API가
+  있으나(조회 네이티브는 비대칭) 현재 도구로는 제공하지 않는다. (로드맵 참조)
+- 누름틀(필드, `ClickHere`)과 양식 개체는 모두 정상 저장·라운드트립된다.
 
 ## 테스트
 

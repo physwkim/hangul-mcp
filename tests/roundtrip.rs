@@ -5,9 +5,10 @@
 use std::path::PathBuf;
 
 use hangul_mcp::server::{
-    DocIdParams, FitTableToPageParams, GetTableParams, HangulMcp, InsertTableColumnParams,
-    InsertTableRowParams, InsertTextParams, OpenDocumentParams, ParaParams, ReplaceTextParams,
-    SaveDocumentParams, SetCellTextParams,
+    DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams, GetTableParams, HangulMcp,
+    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, OpenDocumentParams,
+    ParaParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
+    SetFormValueParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -425,4 +426,224 @@ fn unknown_doc_id_is_invalid_params() {
         }))
         .expect_err("없는 doc_id는 에러여야 함");
     assert!(err.message.contains("doc-999"), "에러 메시지: {err:?}");
+}
+
+/// list_forms로 지정 종류의 폼 좌표 (section, para, control)를 찾는다.
+fn find_form(forms: &Value, form_type: &str) -> (usize, usize, usize) {
+    let f = forms["forms"]
+        .as_array()
+        .expect("forms 배열")
+        .iter()
+        .find(|f| f["formType"] == form_type)
+        .unwrap_or_else(|| panic!("{form_type} 폼 없음: {forms}"));
+    (
+        f["section"].as_u64().unwrap() as usize,
+        f["para"].as_u64().unwrap() as usize,
+        f["control"].as_u64().unwrap() as usize,
+    )
+}
+
+#[test]
+fn form_set_value_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("form_fields.hwpx"));
+
+    // 1) 폼 목록 — 5개(모든 타입) 확인, Edit/CheckBox 좌표 확보
+    let forms = server
+        .list_forms(Parameters(DocIdParams {
+            doc_id: doc_id.clone(),
+        }))
+        .expect("list_forms");
+    let forms: Value = serde_json::from_str(&forms).unwrap();
+    assert_eq!(
+        forms["forms"].as_array().map(|a| a.len()),
+        Some(5),
+        "폼 5개 기대: {forms}"
+    );
+    let (e_sec, e_para, e_ctrl) = find_form(&forms, "Edit");
+    let (c_sec, c_para, c_ctrl) = find_form(&forms, "CheckBox");
+
+    // 2) Edit 텍스트(문자열 경로) + CheckBox 값(정수 경로) 설정
+    let set = server
+        .set_form_value(Parameters(SetFormValueParams {
+            doc_id: doc_id.clone(),
+            section: e_sec,
+            para: e_para,
+            control: e_ctrl,
+            value: None,
+            text: Some("MCP에디트값".to_string()),
+            caption: None,
+        }))
+        .expect("set_form_value (edit)");
+    assert_eq!(
+        serde_json::from_str::<Value>(&set).unwrap()["ok"].as_bool(),
+        Some(true),
+        "edit 설정 실패: {set}"
+    );
+    server
+        .set_form_value(Parameters(SetFormValueParams {
+            doc_id: doc_id.clone(),
+            section: c_sec,
+            para: c_para,
+            control: c_ctrl,
+            value: Some(0), // 원본 CHECKED(1) → 해제(0)
+            text: None,
+            caption: None,
+        }))
+        .expect("set_form_value (checkbox)");
+
+    // 3) 즉시 조회 확인
+    let got = server
+        .get_form_value(Parameters(FormAtParams {
+            doc_id: doc_id.clone(),
+            section: e_sec,
+            para: e_para,
+            control: e_ctrl,
+        }))
+        .expect("get_form_value");
+    let got: Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(
+        got["text"].as_str(),
+        Some("MCP에디트값"),
+        "조회 값 불일치: {got}"
+    );
+
+    // 4) 값 누락 시 invalid_params (방어)
+    let err = server
+        .set_form_value(Parameters(SetFormValueParams {
+            doc_id: doc_id.clone(),
+            section: e_sec,
+            para: e_para,
+            control: e_ctrl,
+            value: None,
+            text: None,
+            caption: None,
+        }))
+        .expect_err("value/text/caption 모두 없으면 에러여야 함");
+    assert!(err.message.contains("최소 하나"), "에러 메시지: {err:?}");
+
+    // 5) 저장 → 재오픈 후 폼 5개 보존 + 값 유지
+    let out_path = temp_out("form_roundtrip.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(out_path.clone()),
+        }))
+        .expect("save_document");
+
+    let (doc_id2, _) = open(&server, &out_path);
+    let forms2 = server
+        .list_forms(Parameters(DocIdParams {
+            doc_id: doc_id2.clone(),
+        }))
+        .expect("재오픈 list_forms");
+    let forms2: Value = serde_json::from_str(&forms2).unwrap();
+    assert_eq!(
+        forms2["forms"].as_array().map(|a| a.len()),
+        Some(5),
+        "저장본에서 폼 소실: {forms2}"
+    );
+
+    // 저장본에서 좌표 재파악 (인덱스 안정성에 의존하지 않음)
+    let (e2_sec, e2_para, e2_ctrl) = find_form(&forms2, "Edit");
+    let got2 = server
+        .get_form_value(Parameters(FormAtParams {
+            doc_id: doc_id2.clone(),
+            section: e2_sec,
+            para: e2_para,
+            control: e2_ctrl,
+        }))
+        .expect("재오픈 get_form_value (edit)");
+    let got2: Value = serde_json::from_str(&got2).unwrap();
+    assert_eq!(
+        got2["text"].as_str(),
+        Some("MCP에디트값"),
+        "저장본에 edit 값 미반영: {got2}"
+    );
+
+    let (c2_sec, c2_para, c2_ctrl) = find_form(&forms2, "CheckBox");
+    let got_cb = server
+        .get_form_value(Parameters(FormAtParams {
+            doc_id: doc_id2,
+            section: c2_sec,
+            para: c2_para,
+            control: c2_ctrl,
+        }))
+        .expect("재오픈 get_form_value (checkbox)");
+    let got_cb: Value = serde_json::from_str(&got_cb).unwrap();
+    assert_eq!(
+        got_cb["value"].as_i64(),
+        Some(0),
+        "저장본에 checkbox 값(해제) 미반영: {got_cb}"
+    );
+}
+
+#[test]
+fn field_set_value_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("form_fields.hwpx"));
+
+    // 1) 필드 목록에서 CLICK_HERE 필드 이름 확보
+    let fields = server
+        .list_fields(Parameters(DocIdParams {
+            doc_id: doc_id.clone(),
+        }))
+        .expect("list_fields");
+    let fields: Value = serde_json::from_str(&fields).unwrap();
+    let name = fields
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["fieldType"] == "clickhere" && !f["name"].as_str().unwrap_or("").is_empty())
+        .and_then(|f| f["name"].as_str())
+        .expect("clickhere 필드 없음 — form_fields.hwpx 확인")
+        .to_string();
+
+    // 2) 값 설정
+    let set = server
+        .set_field_value(Parameters(SetFieldValueParams {
+            doc_id: doc_id.clone(),
+            name: name.clone(),
+            value: "MCP필드값".to_string(),
+        }))
+        .expect("set_field_value");
+    let set: Value = serde_json::from_str(&set).unwrap();
+    assert_eq!(set["ok"].as_bool(), Some(true), "설정 실패: {set}");
+
+    // 3) 조회로 즉시 확인
+    let got = server
+        .get_field_value(Parameters(FieldByNameParams {
+            doc_id: doc_id.clone(),
+            name: name.clone(),
+        }))
+        .expect("get_field_value");
+    let got: Value = serde_json::from_str(&got).unwrap();
+    assert_eq!(
+        got["value"].as_str(),
+        Some("MCP필드값"),
+        "조회 값 불일치: {got}"
+    );
+
+    // 4) 저장 → 재오픈 후 값이 유지되는지 단언
+    let out_path = temp_out("field_roundtrip.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(out_path.clone()),
+        }))
+        .expect("save_document");
+
+    let (doc_id2, _) = open(&server, &out_path);
+    let got2 = server
+        .get_field_value(Parameters(FieldByNameParams {
+            doc_id: doc_id2,
+            name,
+        }))
+        .expect("재오픈 get_field_value");
+    let got2: Value = serde_json::from_str(&got2).unwrap();
+    assert_eq!(
+        got2["value"].as_str(),
+        Some("MCP필드값"),
+        "저장본에 필드 값 미반영: {got2}"
+    );
 }
