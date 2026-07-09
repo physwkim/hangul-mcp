@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (29)
+## Tools (30)
 
 **Session**
 
@@ -62,6 +62,7 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `save_document(doc_id, output_path?)` | Save as HWPX. Overwrites the original when `output_path` is omitted |
 | `close_document(doc_id)` | Close the session. Unsaved changes are discarded, and the result says so |
 | `list_documents()` | Open documents and their dirty state |
+| `server_info()` | Build info: this crate's version, plus the rhwp version and source (git rev) it was built against |
 
 **Reading**
 

@@ -647,3 +647,41 @@ fn field_set_value_roundtrip() {
         "저장본에 필드 값 미반영: {got2}"
     );
 }
+
+/// `server_info` 는 빌드에 실제로 쓰인 rhwp 소스를 답해야 한다.
+///
+/// rhwp 는 git rev 고정 의존성이라 크레이트 버전(0.7.x)만으로는 어떤 커밋인지 알 수 없다.
+/// 재빌드 후 서버가 갱신됐는지 이 도구로 확인하므로, 값이 `Cargo.toml` 과 어긋나면
+/// 확인 수단 자체가 거짓말을 하게 된다.
+#[test]
+fn server_info_reports_pinned_rhwp_rev() {
+    let server = HangulMcp::new();
+    let out = server.server_info().expect("server_info");
+    let info: Value = serde_json::from_str(&out).unwrap();
+
+    assert_eq!(info["name"].as_str(), Some("hangul-mcp"));
+    assert_eq!(info["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
+
+    let source = info["rhwp_source"].as_str().expect("rhwp_source");
+    let manifest =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+            .unwrap();
+    let rhwp_line = manifest
+        .lines()
+        .find(|l| l.starts_with("rhwp = "))
+        .expect("Cargo.toml 의 rhwp 의존성 줄");
+
+    match rhwp_line.split_once("rev = \"") {
+        Some((_, rest)) => {
+            let rev = rest.split('"').next().unwrap();
+            assert!(
+                source.contains(rev),
+                "rhwp_source({source}) 가 Cargo.toml 의 rev({rev}) 를 담고 있지 않다"
+            );
+        }
+        None => assert_eq!(
+            source, "path",
+            "Cargo.toml 이 경로 의존성인데 rhwp_source 가 {source}"
+        ),
+    }
+}

@@ -420,6 +420,19 @@ impl HangulMcp {
         Ok(json!(docs).to_string())
     }
 
+    #[tool(
+        description = "서버 빌드 정보를 반환한다: hangul-mcp 버전과, 빌드에 쓰인 rhwp 의 버전·소스(git rev 또는 로컬 경로). 재빌드 후 서버가 실제로 갱신됐는지 확인할 때 쓴다."
+    )]
+    pub fn server_info(&self) -> Result<String, ErrorData> {
+        Ok(json!({
+            "name": env!("CARGO_PKG_NAME"),
+            "version": env!("CARGO_PKG_VERSION"),
+            "rhwp_version": env!("RHWP_VERSION"),
+            "rhwp_source": env!("RHWP_SOURCE"),
+        })
+        .to_string())
+    }
+
     // ── 읽기 ──
 
     #[tool(
