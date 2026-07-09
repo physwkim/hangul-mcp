@@ -1,11 +1,11 @@
 # hangul-mcp
 
-[rhwp](../rhwp) 기반 HWPX 문서 편집 MCP(Model Context Protocol) 서버.
+[rhwp](https://github.com/physwkim/rhwp) 기반 HWPX 문서 편집 MCP(Model Context Protocol) 서버.
 .hwpx(또는 .hwp) 파일을 열어 메모리에서 편집하고 HWPX로 저장한다.
 
 ## 빌드 / 등록
 
-`../rhwp` 체크아웃이 필요하다 (path 의존성).
+rhwp는 git rev 고정 의존성이라 별도 체크아웃이 필요 없다. cargo가 받아온다.
 
 ```bash
 cargo build --release
@@ -92,7 +92,7 @@ claude mcp add hangul-mcp -- /Users/stevek/codes/hangul-mcp/target/release/hangu
 ## 알려진 제약
 
 - **양식 개체 도구는 rhwp의 양식 개체 직렬화기(`serializer/hwpx/form.rs`)를 필요로 한다.**
-  이 path 의존(`../rhwp`)이 해당 writer를 포함한 버전이어야 저장 시 양식 개체가 보존된다.
+  `Cargo.toml`이 고정한 rev가 해당 writer를 포함한 버전이어야 저장 시 양식 개체가 보존된다.
   writer가 없는 rhwp 버전으로 빌드하면 양식 개체가 포함된 문서를 저장할 때 개체가 사라진다.
 - **표 셀 안의 양식 개체는 아직 노출하지 않는다.** `list_forms`/`get_form_*`/`set_form_value`는
   본문 문단 수준의 양식 개체만 다룬다. 셀 내부 양식 개체 설정은 rhwp에 네이티브 API가
