@@ -2,3 +2,6 @@
 
 # tests/roundtrip.rs 가 매 실행마다 재생성하는 데모 산출물
 /report.hwpx
+
+# macOS Finder 메타데이터 (모든 하위 디렉터리)
+.DS_Store
