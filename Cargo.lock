@@ -886,7 +886,7 @@ dependencies = [
 [[package]]
 name = "rhwp"
 version = "0.7.17"
-source = "git+https://github.com/physwkim/rhwp?rev=9f5b4844#9f5b4844b24f04b93d80518ff6025cf3d90e0eb9"
+source = "git+https://github.com/physwkim/rhwp?rev=3fbcb8c1#3fbcb8c1782f00328a0ed3e7757c090a12d964d6"
 dependencies = [
  "base64",
  "blake3",

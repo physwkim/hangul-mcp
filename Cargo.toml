@@ -6,7 +6,7 @@ description = "MCP server for editing HWPX documents, built on rhwp"
 license = "MIT"
 
 [dependencies]
-rhwp = { git = "https://github.com/physwkim/rhwp", rev = "9f5b4844" }
+rhwp = { git = "https://github.com/physwkim/rhwp", rev = "3fbcb8c1" }
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
 serde = { version = "1", features = ["derive"] }
