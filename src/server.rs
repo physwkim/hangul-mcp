@@ -398,6 +398,28 @@ pub struct ApplyParaFormatParams {
     pub format: ParaFormat,
 }
 
+/// 스타일 지정: list_styles의 id(숫자) 또는 이름(한글/영문, 문자열).
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum StyleRef {
+    Id(usize),
+    Name(String),
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyStyleParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
+    pub para: usize,
+    /// 지정하면 본문 대신 표 셀 문단에 적용한다
+    pub cell: Option<CellTarget>,
+    /// 적용할 스타일 (id 숫자 또는 이름 문자열, 예: 3 또는 "개요 1")
+    pub style: StyleRef,
+}
+
 // ─── 도구 구현 ────────────────────────────────────────────────
 
 #[tool_router]
@@ -886,7 +908,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)의 문단 서식(정렬, 줄 간격, 여백, 들여쓰기, 문단 간격, 줄 나눔 등)을 apply_para_format의 format과 같은 형태로 조회한다."
+        description = "문단(또는 표 셀 문단)의 문단 서식(정렬, 줄 간격, 여백, 들여쓰기, 문단 간격, 줄 나눔 등)을 apply_para_format의 format과 같은 형태로 조회한다. 문단에 적용된 스타일과 개요/번호 머리(heading: type None/Outline/Number/Bullet, level 1~7)도 함께 돌려준다."
     )]
     pub fn get_para_format(
         &self,
@@ -899,7 +921,21 @@ impl HangulMcp {
             let ps = doc.doc_info.para_shapes.get(id as usize).ok_or_else(|| {
                 ErrorData::internal_error(format!("문단 모양 {id} 이 문서에 없다"), None)
             })?;
-            Ok(json!({ "format": ParaFormat::from_shape(ps) }).to_string())
+            let style = doc.doc_info.styles.get(para.style_id as usize).map(|st| {
+                json!({"id": para.style_id, "name": st.local_name, "english_name": st.english_name})
+            });
+            // 개요/번호/글머리표. 번호 정의가 문서마다 달라 적용 입력에는 두지 않고
+            // 조회로만 알려준다 (개요 수준은 apply_style 로 바꾼다).
+            let heading = json!({
+                "type": format!("{:?}", ps.head_type),
+                "level": ps.para_level + 1,
+            });
+            Ok(json!({
+                "format": ParaFormat::from_shape(ps),
+                "style": style,
+                "heading": heading,
+            })
+            .to_string())
         })
     }
 
@@ -925,6 +961,73 @@ impl HangulMcp {
                 None => session
                     .core
                     .apply_para_format_native(p.section, p.para, &props),
+            }
+            .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "문서에 정의된 스타일 목록을 반환한다: id, 이름(한글/영문), 종류(para=문단 스타일, char=글자 스타일)."
+    )]
+    pub fn list_styles(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let styles: Vec<_> = session
+                .core
+                .document()
+                .doc_info
+                .styles
+                .iter()
+                .enumerate()
+                .map(|(id, st)| {
+                    json!({
+                        "id": id,
+                        "name": st.local_name,
+                        "english_name": st.english_name,
+                        "kind": if st.style_type == 1 { "char" } else { "para" },
+                    })
+                })
+                .collect();
+            Ok(json!({ "styles": styles }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "문단(또는 표 셀 문단)에 스타일을 적용한다. style은 list_styles의 id 또는 이름. 문단 스타일은 문단 모양과 글자 모양을, 글자 스타일은 문단 전체 글자 모양을 바꾼다. 문단에 직접 준 문단 서식(스타일과 다른 문단 모양)이 있으면 그 문단 모양은 유지되고, 직접 준 글자 서식도 유지된다."
+    )]
+    pub fn apply_style(
+        &self,
+        Parameters(p): Parameters<ApplyStyleParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let styles = &session.core.document().doc_info.styles;
+            let style_id = match &p.style {
+                StyleRef::Id(id) if *id < styles.len() => *id,
+                StyleRef::Id(id) => {
+                    return Err(ErrorData::invalid_params(
+                        format!("스타일 id {id} 가 없다 (스타일 {}개)", styles.len()),
+                        None,
+                    ))
+                }
+                StyleRef::Name(name) => styles
+                    .iter()
+                    .position(|st| st.local_name == *name || st.english_name == *name)
+                    .ok_or_else(|| {
+                        ErrorData::invalid_params(
+                            format!("스타일 {name:?} 이 없다 (list_styles 로 확인)"),
+                            None,
+                        )
+                    })?,
+            };
+            match &p.cell {
+                Some(c) => session.core.apply_cell_style_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    style_id,
+                ),
+                None => session.core.apply_style_native(p.section, p.para, style_id),
             }
             .map_err(hwp_err)
         })
@@ -1216,6 +1319,7 @@ impl ServerHandler for HangulMcp {
                  list_forms로 좌표를 보고 set_form_value(section, para, control, ...)로 채운다. \
                  글자 서식(색/굵게/크기/글꼴 등)은 apply_char_format, 문단 서식(정렬/줄 간격/여백 등)은 \
                  apply_para_format으로 바꾸고, 현재 서식은 get_char_format/get_para_format으로 본다. \
+                 스타일(바탕글/개요 1 등)은 list_styles로 보고 apply_style로 건다. \
                  모든 인덱스는 0-기반, 문자 위치는 char 단위다. \
                  편집은 메모리에서만 일어나며 save_document 전에는 파일이 바뀌지 않는다.",
             )

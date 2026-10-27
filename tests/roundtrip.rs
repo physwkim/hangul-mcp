@@ -8,11 +8,11 @@ use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::server::{
-    ApplyCharFormatParams, ApplyParaFormatParams, DocIdParams, FieldByNameParams,
+    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, DocIdParams, FieldByNameParams,
     FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams, HangulMcp,
     InsertTableColumnParams, InsertTableRowParams, InsertTextParams, OpenDocumentParams,
     ParaParams, ParaTargetParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
-    SetFieldValueParams, SetFormValueParams, SplitParagraphParams,
+    SetFieldValueParams, SetFormValueParams, SplitParagraphParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -1312,5 +1312,132 @@ fn apply_char_format_font_name_uses_per_language_ids() {
             "언어 {lang} 글꼴 (ids {:?})",
             cs.font_ids
         );
+    }
+}
+
+fn para_heading(server: &HangulMcp, doc_id: &str) -> Value {
+    para_field(server, doc_id, "heading")
+}
+
+fn para_style(server: &HangulMcp, doc_id: &str) -> Value {
+    para_field(server, doc_id, "style")
+}
+
+fn para_field(server: &HangulMcp, doc_id: &str, key: &str) -> Value {
+    let out = server
+        .get_para_format(Parameters(ParaTargetParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para: 0,
+            cell: None,
+        }))
+        .expect("get_para_format");
+    serde_json::from_str::<Value>(&out).unwrap()[key].clone()
+}
+
+/// 이름으로 지정한 스타일이 문단에 걸리고, 저장본에서도 그 스타일의 문단 모양을 쓴다.
+#[test]
+fn apply_style_by_name_and_id_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let styles: Value = serde_json::from_str(
+        &server
+            .list_styles(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .expect("list_styles"),
+    )
+    .unwrap();
+    let outline1 = styles["styles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|st| st["name"] == "개요 1")
+        .expect("픽스처에 '개요 1' 스타일 없음");
+    assert_eq!(outline1["kind"], "para");
+    let outline1_id = outline1["id"].as_u64().unwrap() as usize;
+    assert_ne!(
+        para_style(&server, &doc_id)["id"],
+        outline1_id,
+        "이미 개요 1"
+    );
+
+    let apply = |style: StyleRef| {
+        server.apply_style(Parameters(ApplyStyleParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            style,
+        }))
+    };
+    apply(StyleRef::Name("개요 1".to_string())).expect("apply_style 이름");
+    assert_eq!(para_style(&server, &doc_id)["name"], "개요 1");
+    // 픽스처 문단은 직접 준 문단 서식이 있어 rhwp 가 문단 모양을 유지한다 — 문단 모양
+    // 변화는 단정하지 않고, 적용 직후 상태가 저장 뒤에도 같은지만 본다.
+    let format_after = get_para(&server, &doc_id, 0, None);
+    let heading = para_heading(&server, &doc_id);
+
+    for name in ["style.hwpx", "style.hwp"] {
+        let path = temp_out(name);
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.clone(),
+                output_path: Some(path.clone()),
+            }))
+            .expect("save_document");
+        let (reopened, _) = open(&server, &path);
+        assert_eq!(para_style(&server, &reopened)["name"], "개요 1", "{name}");
+        assert_eq!(
+            get_para(&server, &reopened, 0, None),
+            format_after,
+            "{name}"
+        );
+        assert_eq!(para_heading(&server, &reopened), heading, "{name}");
+    }
+
+    apply(StyleRef::Id(0)).expect("apply_style id");
+    assert_eq!(para_style(&server, &doc_id)["id"], 0);
+
+    for (label, style) in [
+        ("없는 이름", StyleRef::Name("없는 스타일".to_string())),
+        ("없는 id", StyleRef::Id(10_000)),
+    ] {
+        let err = apply(style).expect_err(label);
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{label}");
+    }
+}
+
+/// 직접 서식이 없는 문단(문단 모양 = 스타일 문단 모양)에 "개요 1" 을 걸면 개요 1수준
+/// 머리가 붙고, 저장본에서도 유지돼야 한다.
+#[test]
+fn apply_style_outline_sets_heading() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("form_fields.hwpx"));
+    assert_eq!(para_heading(&server, &doc_id)["type"], "None");
+    server
+        .apply_style(Parameters(ApplyStyleParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            style: StyleRef::Name("개요 1".to_string()),
+        }))
+        .expect("apply_style");
+    let heading = para_heading(&server, &doc_id);
+    assert_eq!(heading["type"], "Outline", "{heading}");
+    assert_eq!(heading["level"], 1, "{heading}");
+
+    for name in ["style_outline.hwpx", "style_outline.hwp"] {
+        let path = temp_out(name);
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.clone(),
+                output_path: Some(path.clone()),
+            }))
+            .expect("save_document");
+        let (reopened, _) = open(&server, &path);
+        assert_eq!(para_heading(&server, &reopened), heading, "{name}");
+        assert_eq!(para_style(&server, &reopened)["name"], "개요 1", "{name}");
     }
 }
