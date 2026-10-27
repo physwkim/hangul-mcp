@@ -183,7 +183,7 @@ an equation inside a textbox is rejected — rhwp's natives for those take table
 |------|-------------|
 | `list_forms(doc_id)` | Every form object, including those in table cells (position `section/para/control`, plus `cell = {control, cell, cell_para}` inside a cell; kind, name, value, caption, text) |
 | `get_form_value(doc_id, section, para, control, cell?)` | Read a form object's value (kind, value, text, caption, enabled) |
-| `get_form_info(doc_id, section, para, control, cell?)` | Details: size, colors, attributes, combo box items (not available for a combo box inside a cell) |
+| `get_form_info(doc_id, section, para, control, cell?)` | Details: size, colors, attributes, combo box items |
 | `set_form_value(doc_id, section, para, control, cell?, value?, text?, caption?)` | Set a value (at least one of the three) |
 
 **Bookmarks and hyperlinks**
@@ -204,9 +204,6 @@ an equation inside a textbox is rejected — rhwp's natives for those take table
   Form objects are preserved on save only if the rev pinned in `Cargo.toml` includes that
   writer. Building against an rhwp version without it silently drops form objects when a
   document containing them is saved.
-- **Combo box items inside table cells cannot be read.** rhwp extracts combo box items from
-  the document script only for body-level form objects, so `get_form_info` rejects a combo box
-  inside a cell. Its value is still readable and settable with `get_form_value`/`set_form_value`.
 - **Bookmarks inside table cells are listed but cannot be renamed or deleted**, and bookmarks
   are added to body paragraphs only: rhwp's bookmark editing addresses body paragraphs only.
 - Fields (`ClickHere`) and form objects both save and round-trip correctly.
@@ -224,7 +221,7 @@ first cell paragraph that holds one). `biz_plan.hwp` is a Hancom-written HWP 5.0
 `.hwp` reader is exercised on a real file and not only on files rhwp wrote itself.
 `cell_bookmark.hwpx` is rhwp's `issue6284/child_policy_top_caption_charts.hwpx`, whose bookmarks
 all sit in table cells. `columns_unequal.hwpx` is `ref_text.hwpx` with its `colPr` changed to two
-columns of unequal width (`sameSz="0"`, two `colSz`), since no sample's first column definition has one. `picture_in_cell.hwpx` is rhwp's
+columns of unequal width (`sameSz="0"`, two `colSz`), since no sample's first column definition has one. `combo_in_cell.hwpx` is `form_in_cells.hwpx` with its first cell checkbox replaced by the combo box from `form_fields.hwpx`, plus that file's `Scripts/`, so a combo box inside a cell has script items. `picture_in_cell.hwpx` is rhwp's
 `issue3587/d-pi2-import.hwpx` (a picture inside a table cell).
 
 ## Out of scope (possible follow-ups)

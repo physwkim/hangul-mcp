@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rhwp::document_core::hyperlink::HyperlinkTarget;
-use rhwp::model::control::{Control, FormObject, FormType};
+use rhwp::model::control::{Control, FormObject};
 use rhwp::model::document::Document;
 use rhwp::model::shape::ShapeObject;
 use rhwp::DocumentCore;
@@ -3913,7 +3913,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "양식 개체의 상세 정보를 반환한다: 값/텍스트/캡션 + 크기·색·속성(properties), 콤보박스는 항목 목록 포함. 표 셀 안의 콤보박스는 항목 목록을 읽을 수 없어 오류."
+        description = "양식 개체의 상세 정보를 반환한다: 값/텍스트/캡션 + 크기·색·속성(properties), 콤보박스는 항목 목록 포함."
     )]
     pub fn get_form_info(
         &self,
@@ -3933,27 +3933,27 @@ impl HangulMcp {
                     .get_form_object_info_native(p.section, p.para, p.control)
                     .map_err(hwp_err);
             }
-            // 콤보박스 항목은 rhwp 가 문서 스크립트에서 private 함수로만 뽑는다
-            // (get_form_object_info_native 는 본문 좌표만 받는다).
-            if f.form_type == FormType::ComboBox {
-                return Err(ErrorData::invalid_params(
-                    "표 셀 안 콤보박스의 항목 목록은 rhwp가 노출하지 않는다 (값은 get_form_value)",
-                    None,
-                ));
-            }
-            let mut info = form_value_json(f);
-            let properties: std::collections::BTreeMap<_, _> = f.properties.iter().collect();
-            info.as_object_mut()
-                .expect("form_value_json 은 객체")
-                .extend([
-                    ("width".to_string(), json!(f.width)),
-                    ("height".to_string(), json!(f.height)),
-                    ("foreColor".to_string(), json!(f.fore_color)),
-                    ("backColor".to_string(), json!(f.back_color)),
-                    ("properties".to_string(), json!(properties)),
-                    ("items".to_string(), json!([])),
-                ]);
-            Ok(info.to_string())
+            // get_form_object_info_native 는 본문 좌표만 받고, 콤보 항목 추출(스크립트 InsertString)은
+            // rhwp private 함수다. 결과는 양식 개체와 문서 스크립트에만 달렸으므로 그 둘만 담은
+            // 임시 문서의 본문 (0,0,0) 에서 같은 함수를 돌려 본문 양식과 같은 JSON 을 얻는다.
+            let mut probe = rhwp::document_core::DocumentCore::new_empty();
+            let doc = probe.document_mut();
+            doc.extra_streams = session
+                .core
+                .document()
+                .extra_streams
+                .iter()
+                .filter(|(path, _)| path.contains("Scripts/"))
+                .cloned()
+                .collect();
+            doc.sections = vec![rhwp::model::document::Section {
+                paragraphs: vec![rhwp::model::paragraph::Paragraph {
+                    controls: vec![Control::Form(Box::new(f.clone()))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }];
+            probe.get_form_object_info_native(0, 0, 0).map_err(hwp_err)
         })
     }
 

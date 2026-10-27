@@ -3315,6 +3315,39 @@ fn cell_form_value(doc: &rhwp::model::document::Document, entry: &Value) -> i32 
     }
 }
 
+/// 표 셀 안 콤보박스도 본문 콤보와 같이 문서 스크립트의 InsertString 항목을 돌려준다.
+#[test]
+fn combo_in_table_cell_lists_script_items() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("combo_in_cell.hwpx"));
+    let forms = list_forms(&server, &doc_id);
+    let entry = forms
+        .iter()
+        .find(|f| !f["cell"].is_null() && f["formType"] == "ComboBox")
+        .expect("셀 안 콤보박스")
+        .clone();
+    let info: Value = serde_json::from_str(
+        &server
+            .get_form_info(Parameters(form_at_params(
+                &doc_id,
+                &entry,
+                Some(cell_target_of(&entry)),
+            )))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        info["items"],
+        serde_json::json!(["봄", "여름", "가을", "겨울"]),
+        "{info}"
+    );
+    assert_eq!(
+        (info["name"].as_str(), info["width"].as_u64()),
+        (Some("ComboBox"), Some(6058)),
+        "{info}"
+    );
+}
+
 /// 표 셀 안 체크박스: list_forms 가 cell 좌표로 알리고, get_form_value/get_form_info 가
 /// 읽고, set_form_value 로 바꾼 값이 HWPX/HWP 저장 뒤에도 남는다.
 #[test]
