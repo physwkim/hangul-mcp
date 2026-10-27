@@ -1521,6 +1521,7 @@ fn create_table(server: &HangulMcp, doc_id: &str, rows: u16, cols: u16) -> (usiz
             column_widths_percent: None,
             column_widths: None,
             repeat_header: None,
+            cells: None,
         }))
         .expect("create_table");
     let v: Value = serde_json::from_str(&out).unwrap();
@@ -1677,6 +1678,7 @@ fn table_tools_reject_invalid_input() {
         column_widths_percent: Some(vec![50.0, 50.0]),
         column_widths: Some(vec![1000, 1000]),
         repeat_header: None,
+        cells: None,
     }));
     assert!(both_widths.is_err(), "폭 두 종류 동시 지정은 거부돼야 함");
     let bad_pct = server.create_table(Parameters(CreateTableParams {
@@ -1689,6 +1691,7 @@ fn table_tools_reject_invalid_input() {
         column_widths_percent: Some(vec![30.0, 30.0]),
         column_widths: None,
         repeat_header: None,
+        cells: None,
     }));
     assert!(bad_pct.is_err(), "합이 100이 아닌 비율은 거부돼야 함");
     let zero_rows = server.create_table(Parameters(CreateTableParams {
@@ -1701,6 +1704,7 @@ fn table_tools_reject_invalid_input() {
         column_widths_percent: None,
         column_widths: None,
         repeat_header: None,
+        cells: None,
     }));
     assert!(zero_rows.is_err(), "0행 표는 거부돼야 함");
 
@@ -1958,6 +1962,7 @@ fn body_offset_tools_reject_past_paragraph_end() {
                 column_widths_percent: None,
                 column_widths: None,
                 repeat_header: None,
+                cells: None,
             }))
         }),
         ("insert_picture", |s, d, off, png| {
@@ -2107,6 +2112,7 @@ fn create_table_offset_counts_text_chars_after_inline_object() {
             column_widths_percent: None,
             column_widths: None,
             repeat_header: None,
+            cells: None,
         }))
         .expect("create_table");
     let v: Value = serde_json::from_str(&out).unwrap();
@@ -5303,4 +5309,99 @@ fn delete_object_shape_roundtrip() {
             .count();
         assert_eq!(shapes, 0, "{ext}");
     }
+}
+
+fn table_with_cells(
+    server: &HangulMcp,
+    doc_id: &str,
+    (rows, cols): (u16, u16),
+    cells: Vec<Vec<&str>>,
+) -> Result<String, rmcp::ErrorData> {
+    server.create_table(Parameters(CreateTableParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        rows,
+        cols,
+        column_widths_percent: None,
+        column_widths: None,
+        repeat_header: None,
+        cells: Some(
+            cells
+                .into_iter()
+                .map(|r| r.into_iter().map(str::to_string).collect())
+                .collect(),
+        ),
+    }))
+}
+
+/// cells 는 행 우선으로 채워지고, 모자란 행·열은 빈 셀, 줄바꿈은 셀 문단 나눔이다.
+#[test]
+fn create_table_with_cells_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let out = table_with_cells(
+        &server,
+        &doc_id,
+        (3, 3),
+        vec![
+            vec!["이름", "나이", "비고"],
+            vec!["홍길동", "첫 줄\n\n셋째 줄"],
+        ],
+    )
+    .unwrap();
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let (para, control) = (
+        v["paraIdx"].as_u64().unwrap() as usize,
+        v["controlIdx"].as_u64().unwrap() as usize,
+    );
+    let want: [((u16, u16), &[&str]); 9] = [
+        ((0, 0), &["이름"]),
+        ((0, 1), &["나이"]),
+        ((0, 2), &["비고"]),
+        ((1, 0), &["홍길동"]),
+        ((1, 1), &["첫 줄", "", "셋째 줄"]),
+        ((1, 2), &[""]),
+        ((2, 0), &[""]),
+        ((2, 1), &[""]),
+        ((2, 2), &[""]),
+    ];
+    for (ext, doc) in save_both(&server, &doc_id, "table_cells") {
+        let table = table_at(&doc, para, control);
+        for ((row, col), texts) in want {
+            let cell = table
+                .cells
+                .iter()
+                .find(|c| (c.row, c.col) == (row, col))
+                .unwrap_or_else(|| panic!("{ext} 셀 {row},{col} 없음"));
+            let got: Vec<&str> = cell.paragraphs.iter().map(|p| p.text.as_str()).collect();
+            assert_eq!(got, texts, "{ext} 셀 {row},{col}");
+            if ext == "hwp" {
+                // 빈 문단에 PARA_TEXT(CR 만)가 남으면 한컴이 손상 파일로 본다.
+                for p in cell.paragraphs.iter().filter(|p| p.text.is_empty()) {
+                    assert!(!p.has_para_text, "{ext} 셀 {row},{col} 빈 문단에 PARA_TEXT");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn create_table_rejects_bad_cells() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    for cells in [
+        vec![vec!["a"], vec!["b"], vec!["c"]],
+        vec![vec!["a", "b", "c"]],
+        vec![vec!["탭\t문자"]],
+    ] {
+        let desc = format!("{cells:?}");
+        let err = table_with_cells(&server, &doc_id, (2, 2), cells).expect_err(&desc);
+        assert!(err.message.contains("cells"), "{desc}: {}", err.message);
+    }
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 create_table 이 되돌리기 기록을 남김"
+    );
 }

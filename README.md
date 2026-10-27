@@ -126,7 +126,7 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 
 | Tool | Description |
 |------|-------------|
-| `create_table(doc_id, section, para, char_offset, rows, cols, column_widths_percent?, column_widths?, repeat_header?)` | Insert a new table; returns its `paraIdx`/`controlIdx` |
+| `create_table(doc_id, section, para, char_offset, rows, cols, column_widths_percent?, column_widths?, repeat_header?, cells?)` | Insert a new table; returns its `paraIdx`/`controlIdx`. `cells` fills it in the same call: a list of rows, each a list of cell texts in column order (at most `rows`×`cols`; missing cells stay empty; `\n` starts a new cell paragraph) |
 | `set_cell_text(doc_id, section, para, control, cell, cell_para?, text)` | Replace a cell paragraph's text |
 | `insert_table_row(doc_id, section, para, control, row, below?)` | Insert a row |
 | `insert_table_column(doc_id, section, para, control, col, right?)` | Insert a column |

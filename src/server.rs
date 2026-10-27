@@ -90,6 +90,39 @@ fn check_offset(
     Ok(())
 }
 
+/// 여러 줄 텍스트를 줄(문단)로 나눈다. 줄바꿈 외의 제어 문자는 rhwp 가 문단 텍스트에 그대로
+/// 넣어 저장본이 깨지므로 받지 않는다.
+fn text_lines<'a>(name: &str, text: &'a str) -> Result<Vec<&'a str>, ErrorData> {
+    if text.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(ErrorData::invalid_params(
+            format!("{name} 에 줄바꿈(\\n) 외의 제어 문자를 쓸 수 없다"),
+            None,
+        ));
+    }
+    Ok(text.split('\n').collect())
+}
+
+/// 빈 문단 하나인 새 표 셀(글상자는 cell 0)을 `lines` 로 한 줄에 한 문단씩 채운다.
+fn fill_cell_lines(
+    core: &mut DocumentCore,
+    section: usize,
+    para: usize,
+    control: usize,
+    cell: usize,
+    lines: &[&str],
+) -> Result<(), ErrorData> {
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            let prev = lines[i - 1].chars().count();
+            core.split_paragraph_in_cell_native(section, para, control, cell, i - 1, prev, None)
+                .map_err(hwp_err)?;
+        }
+        core.insert_text_in_cell_native(section, para, control, cell, i, 0, line)
+            .map_err(hwp_err)?;
+    }
+    Ok(())
+}
+
 /// 글자 단위 위치를 rhwp 문단 분할 API(split/쪽·단 나누기/표 삽입)의 논리 위치로 바꾼다.
 ///
 /// 서버 도구의 char_offset 은 문단 텍스트의 글자 위치다(get_text·insert_text 와 같은 자).
@@ -1075,6 +1108,9 @@ pub struct CreateTableParams {
     pub column_widths: Option<Vec<u32>>,
     /// true면 첫 행을 쪽마다 반복되는 머리행으로 지정한다
     pub repeat_header: Option<bool>,
+    /// 셀 내용: 행 목록, 각 행은 열 순서의 셀 텍스트. rows×cols 이하이며 모자란 셀은 비운다.
+    /// 셀 텍스트의 줄바꿈(\n)마다 셀 문단이 나뉜다
+    pub cells: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2751,7 +2787,7 @@ impl HangulMcp {
     // ── 표 편집 ──
 
     #[tool(
-        description = "문단의 char_offset 위치에 rows×cols 새 표를 삽입한다. 반환값의 paraIdx/controlIdx가 표의 para/control 좌표다. 열 폭은 column_widths_percent(합 100) 또는 column_widths(HWPUNIT) 중 하나로 지정, 생략 시 균등."
+        description = "문단의 char_offset 위치에 rows×cols 새 표를 삽입한다. 반환값의 paraIdx/controlIdx가 표의 para/control 좌표다. 열 폭은 column_widths_percent(합 100) 또는 column_widths(HWPUNIT) 중 하나로 지정, 생략 시 균등. cells(행마다 열 순서의 텍스트, \\n마다 셀 문단)로 만들면서 채울 수 있다."
     )]
     pub fn create_table(
         &self,
@@ -2773,14 +2809,49 @@ impl HangulMcp {
             column_alignments: None,
             repeat_header: p.repeat_header,
         };
+        let cells = p.cells.unwrap_or_default();
+        if cells.len() > usize::from(p.rows) || cells.iter().any(|r| r.len() > usize::from(p.cols))
+        {
+            return Err(ErrorData::invalid_params(
+                format!("cells 가 표 크기 {}×{} 를 넘는다", p.rows, p.cols),
+                None,
+            ));
+        }
+        let cells = cells
+            .iter()
+            .map(|row| row.iter().map(|t| text_lines("cells", t)).collect())
+            .collect::<Result<Vec<Vec<_>>, _>>()?;
         self.store.with_session_edit(&p.doc_id, |session| {
             let offset = split_offset(&session.core, p.section, p.para, None, p.char_offset)?;
-            session
+            let out = session
                 .core
                 .create_table_with_options_native(
                     p.section, p.para, offset, p.rows, p.cols, &options,
                 )
-                .map_err(hwp_err)
+                .map_err(hwp_err)?;
+            if cells.is_empty() {
+                return Ok(out);
+            }
+            let v: Value = serde_json::from_str(&out).map_err(|e| {
+                ErrorData::internal_error(format!("create_table 결과 해석 실패: {e}"), None)
+            })?;
+            let (para, ctrl) = match (v["paraIdx"].as_u64(), v["controlIdx"].as_u64()) {
+                (Some(para), Some(ctrl)) => (para as usize, ctrl as usize),
+                _ => {
+                    return Err(ErrorData::internal_error(
+                        format!("create_table 결과에 paraIdx/controlIdx 없음: {out}"),
+                        None,
+                    ))
+                }
+            };
+            // 새 표의 셀은 행 우선 순서다.
+            for (r, row) in cells.iter().enumerate() {
+                for (c, lines) in row.iter().enumerate() {
+                    let cell = r * usize::from(p.cols) + c;
+                    fill_cell_lines(&mut session.core, p.section, para, ctrl, cell, lines)?;
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -3354,13 +3425,7 @@ impl HangulMcp {
             Some(t) if t.is_empty() => {
                 return Err(ErrorData::invalid_params("text 가 비었다", None))
             }
-            Some(t) if t.chars().any(|c| c.is_control() && c != '\n') => {
-                return Err(ErrorData::invalid_params(
-                    "text 에 줄바꿈(\\n) 외의 제어 문자를 쓸 수 없다",
-                    None,
-                ))
-            }
-            Some(t) => t.split('\n').collect(),
+            Some(t) => text_lines("text", t)?,
         };
         let kind = match p.kind {
             ShapeKind::Rectangle => "rectangle",
@@ -3428,21 +3493,7 @@ impl HangulMcp {
                 }
             };
             // 글상자 문단은 rhwp 셀 편집 API 가 cell 0 으로 가리킨다.
-            for (i, line) in lines.iter().enumerate() {
-                if i > 0 {
-                    let prev = lines[i - 1].chars().count();
-                    session
-                        .core
-                        .split_paragraph_in_cell_native(p.section, para, ctrl, 0, i - 1, prev, None)
-                        .map_err(hwp_err)?;
-                }
-                if !line.is_empty() {
-                    session
-                        .core
-                        .insert_text_in_cell_native(p.section, para, ctrl, 0, i, 0, line)
-                        .map_err(hwp_err)?;
-                }
-            }
+            fill_cell_lines(&mut session.core, p.section, para, ctrl, 0, &lines)?;
             Ok(json!({"para": para, "control": ctrl}).to_string())
         })
     }
