@@ -3018,7 +3018,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "표 서식을 반환한다: 배치(inline 글자처럼 취급, text_wrap, horz/vert_rel_to·align·offset_mm, 바깥 margin_*_mm), cell_padding_*_mm(셀 기본 안 여백), cell_spacing_mm, repeat_header. 결과는 apply_table_format의 format 입력과 같은 모양."
+        description = "표 서식을 반환한다: 배치(inline 글자처럼 취급, text_wrap, horz/vert_rel_to·align·offset_mm, 바깥 margin_*_mm), cell_padding_*_mm(셀 기본 안 여백), cell_spacing_mm, page_break(none/cell/row), repeat_header. 결과는 apply_table_format의 format 입력과 같은 모양."
     )]
     pub fn get_table_format(
         &self,
@@ -3031,7 +3031,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "표 서식을 바꾼다: inline(글자처럼 취급), text_wrap(square/top_and_bottom/behind_text/in_front_of_text), horz_rel_to(paper/page/column/para)·horz_align(left/center/right/inside/outside)·horz_offset_mm, vert_rel_to(paper/page/para)·vert_align(top/center/bottom/inside/outside)·vert_offset_mm, margin_*_mm(바깥 여백), cell_padding_*_mm, cell_spacing_mm, repeat_header. 지정한 항목만 바뀐다."
+        description = "표 서식을 바꾼다: inline(글자처럼 취급), text_wrap(square/top_and_bottom/behind_text/in_front_of_text), horz_rel_to(paper/page/column/para)·horz_align(left/center/right/inside/outside)·horz_offset_mm, vert_rel_to(paper/page/para)·vert_align(top/center/bottom/inside/outside)·vert_offset_mm, margin_*_mm(바깥 여백), cell_padding_*_mm, cell_spacing_mm, page_break(none 나누지 않음/cell 셀 단위로 나눔/row 행 경계에서 나눔), repeat_header. 지정한 항목만 바뀐다."
     )]
     pub fn apply_table_format(
         &self,

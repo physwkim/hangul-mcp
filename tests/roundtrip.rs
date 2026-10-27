@@ -10,8 +10,8 @@ use hangul_mcp::format::{
 };
 use hangul_mcp::page::{Binding, ColumnKind, Columns, Orientation, PageSetup};
 use hangul_mcp::placement::{
-    HorzAlign, HorzRelTo, ImageEffect, PictureFormat, Placement, ShapeFormat, TableFormat,
-    TextWrap as PlacementWrap, VertRelTo,
+    HorzAlign, HorzRelTo, ImageEffect, PageBreak, PictureFormat, Placement, ShapeFormat,
+    TableFormat, TextWrap as PlacementWrap, VertRelTo,
 };
 use hangul_mcp::server::{
     AddBookmarkParams, ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams,
@@ -3731,6 +3731,33 @@ fn table_format_roundtrip() {
             expected,
             "{ext}"
         );
+    }
+}
+
+/// page_break 세 값이 모두 조회와 HWPX/HWP 저장 뒤에 같은 값으로 남는다 (새 표 기본값에서 출발).
+#[test]
+fn table_page_break_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 2, 2);
+    let before = get_table_format(&server, &doc_id, table).page_break;
+    for mode in [PageBreak::None, PageBreak::Cell, PageBreak::Row] {
+        let change = TableFormat {
+            page_break: Some(mode),
+            ..Default::default()
+        };
+        apply_table_format(&server, &doc_id, table, change).unwrap();
+        assert_eq!(
+            get_table_format(&server, &doc_id, table).page_break,
+            Some(mode)
+        );
+        for (ext, doc) in save_both(&server, &doc_id, "table_page_break") {
+            assert_eq!(
+                TableFormat::from_table(table_at(&doc, table.0, table.1)).page_break,
+                Some(mode),
+                "{ext} {mode:?} (처음 {before:?})"
+            );
+        }
     }
 }
 

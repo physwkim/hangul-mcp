@@ -12,7 +12,7 @@ use rhwp::model::shape::{
     TextWrap as RTextWrap, VertAlign as RVertAlign, VertRelTo as RVertRelTo,
 };
 use rhwp::model::style::FillType;
-use rhwp::model::table::Table;
+use rhwp::model::table::{Table, TablePageBreak};
 use rhwp::model::Padding;
 use rmcp::ErrorData;
 use serde::{Deserialize, Serialize};
@@ -317,7 +317,38 @@ impl Placement {
     }
 }
 
-/// 표 서식: 배치 + 표 기본 셀 안 여백·셀 간격·제목 줄 반복. 적용 시 지정한 항목만 바뀐다.
+/// 표가 쪽 끝에 걸릴 때 나누는 방식.
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum PageBreak {
+    /// 나누지 않음 — 표 전체를 다음 쪽으로 넘긴다
+    None,
+    /// 셀 단위로 나눔 — 한 행 안에서도 나눈다
+    Cell,
+    /// 나눔 — 행 경계에서만 나눈다
+    Row,
+}
+
+impl PageBreak {
+    fn from_rhwp(pb: TablePageBreak) -> Self {
+        match pb {
+            TablePageBreak::None => Self::None,
+            TablePageBreak::CellBreak => Self::Cell,
+            TablePageBreak::RowBreak => Self::Row,
+        }
+    }
+
+    /// rhwp `pageBreak` 값 (table_ops 의 0/1/2 매핑).
+    fn rhwp_value(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Cell => 1,
+            Self::Row => 2,
+        }
+    }
+}
+
+/// 표 서식: 배치 + 표 기본 셀 안 여백·셀 간격·쪽 나눔·제목 줄 반복. 적용 시 지정한 항목만 바뀐다.
 #[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Default, PartialEq, Debug)]
 pub struct TableFormat {
     #[serde(flatten)]
@@ -334,6 +365,9 @@ pub struct TableFormat {
     /// 셀 간격 (mm)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell_spacing_mm: Option<f64>,
+    /// 표가 쪽 끝에 걸릴 때 나누는 방식 (none/cell/row)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_break: Option<PageBreak>,
     /// 표가 쪽을 넘을 때 제목 셀 줄을 반복
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repeat_header: Option<bool>,
@@ -354,6 +388,7 @@ impl TableFormat {
             cell_padding_top_mm: Some(hu_to_mm(t.padding.top as f64)),
             cell_padding_bottom_mm: Some(hu_to_mm(t.padding.bottom as f64)),
             cell_spacing_mm: Some(hu_to_mm(t.cell_spacing as f64)),
+            page_break: Some(PageBreak::from_rhwp(t.page_break)),
             repeat_header: Some(t.repeat_header),
         }
     }
@@ -389,6 +424,9 @@ impl TableFormat {
                 check_range(name, v, 0.0, MAX_MARGIN_MM)?;
                 props.insert(key.into(), json!(mm_to_hu16(v)));
             }
+        }
+        if let Some(v) = self.page_break {
+            props.insert("pageBreak".into(), json!(v.rhwp_value()));
         }
         if let Some(v) = self.repeat_header {
             props.insert("repeatHeader".into(), json!(v));
