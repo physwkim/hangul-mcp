@@ -8,12 +8,13 @@ use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::server::{
-    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, CreateTableParams, DocIdParams,
-    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams,
-    HangulMcp, InsertPictureParams, InsertTableColumnParams, InsertTableRowParams,
-    InsertTextParams, MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams,
-    ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
-    SetFormValueParams, SplitParagraphParams, SplitTableCellParams, StyleRef,
+    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, CreateTableParams,
+    DeleteTextParams, DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
+    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, InsertPictureParams,
+    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, MergeTableCellsParams,
+    OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams, SaveDocumentParams,
+    SetCellTextParams, SetFieldValueParams, SetFormValueParams, SplitParagraphParams,
+    SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -1879,5 +1880,102 @@ fn insert_picture_rejects_invalid_input() {
             pictures(&doc).is_empty(),
             "{ext}: 거부된 호출이 그림을 남김"
         );
+    }
+}
+
+/// 본문 위치를 받는 도구는 모두 문단 길이에서 받고 길이+1 에서 거부해야 한다.
+/// rhwp 는 범위 밖 위치를 끝으로 당기거나 무시하므로(오류 없음), 거부 쪽 경계가
+/// 서버 검사를 직접 증명한다.
+#[test]
+fn body_offset_tools_reject_past_paragraph_end() {
+    let server = HangulMcp::new();
+    let (png_path, _) = sample_png("offset_bound.png");
+    type Call = fn(&HangulMcp, &str, usize, &str) -> Result<String, rmcp::ErrorData>;
+    let tools: [(&str, Call); 6] = [
+        ("insert_text", |s, d, off, _| {
+            s.insert_text(Parameters(InsertTextParams {
+                doc_id: d.to_string(),
+                section: 0,
+                para: 0,
+                char_offset: off,
+                text: "X".to_string(),
+            }))
+        }),
+        ("delete_text", |s, d, off, _| {
+            // 끝 위치(off)가 경계가 되도록 마지막 한 글자를 지운다.
+            s.delete_text(Parameters(DeleteTextParams {
+                doc_id: d.to_string(),
+                section: 0,
+                para: 0,
+                char_offset: off - 1,
+                count: 1,
+            }))
+        }),
+        ("split_paragraph", |s, d, off, _| {
+            s.split_paragraph(Parameters(SplitParagraphParams {
+                doc_id: d.to_string(),
+                section: 0,
+                para: 0,
+                char_offset: off,
+            }))
+        }),
+        ("create_table", |s, d, off, _| {
+            s.create_table(Parameters(CreateTableParams {
+                doc_id: d.to_string(),
+                section: 0,
+                para: 0,
+                char_offset: off,
+                rows: 1,
+                cols: 1,
+                column_widths_percent: None,
+                column_widths: None,
+                repeat_header: None,
+            }))
+        }),
+        ("insert_picture", |s, d, off, png| {
+            s.insert_picture(Parameters(InsertPictureParams {
+                char_offset: off,
+                ..picture_params(d, png)
+            }))
+        }),
+        ("delete_text(count 0)", |s, d, off, _| {
+            s.delete_text(Parameters(DeleteTextParams {
+                doc_id: d.to_string(),
+                section: 0,
+                para: 0,
+                char_offset: off.min(1),
+                count: 0,
+            }))
+        }),
+    ];
+    for (label, call) in tools {
+        let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+        let before = server
+            .get_text(Parameters(GetTextParams {
+                doc_id: doc_id.clone(),
+                section: 0,
+                para_start: None,
+                para_end: None,
+            }))
+            .unwrap();
+        let len = 12; // ref_text.hwpx 문단 0 의 글자 수
+        assert!(
+            call(&server, &doc_id, len + 1, &png_path).is_err(),
+            "{label}: 길이+1 은 거부돼야 함"
+        );
+        let after = server
+            .get_text(Parameters(GetTextParams {
+                doc_id: doc_id.clone(),
+                section: 0,
+                para_start: None,
+                para_end: None,
+            }))
+            .unwrap();
+        assert_eq!(before, after, "{label}: 거부된 호출이 문서를 바꿈");
+        if label == "delete_text(count 0)" {
+            continue;
+        }
+        call(&server, &doc_id, len, &png_path)
+            .unwrap_or_else(|e| panic!("{label}: 길이 위치는 받아야 함: {e:?}"));
     }
 }

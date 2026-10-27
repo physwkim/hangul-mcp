@@ -54,6 +54,27 @@ fn hwp_err(e: rhwp::HwpError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
+/// rhwp 본문 편집은 문단 길이를 넘는 char_offset 을 오류 없이 끝으로 당기거나 무시하므로,
+/// 본문 위치를 받는 도구는 모두 편집 전에 `end <= 문단 길이` 를 이 검사로 확인한다.
+fn check_body_offset(
+    core: &DocumentCore,
+    section: usize,
+    para: usize,
+    name: &str,
+    end: usize,
+) -> Result<(), ErrorData> {
+    let len = core
+        .get_paragraph_length_native(section, para)
+        .map_err(hwp_err)?;
+    if end > len {
+        return Err(ErrorData::invalid_params(
+            format!("{name} {end} 가 문단 길이 {len} 를 넘는다"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
@@ -842,6 +863,13 @@ impl HangulMcp {
         Parameters(p): Parameters<InsertTextParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
+            check_body_offset(
+                &session.core,
+                p.section,
+                p.para,
+                "char_offset",
+                p.char_offset,
+            )?;
             session
                 .core
                 .insert_text_native(p.section, p.para, p.char_offset, &p.text)
@@ -854,7 +882,15 @@ impl HangulMcp {
         &self,
         Parameters(p): Parameters<DeleteTextParams>,
     ) -> Result<String, ErrorData> {
+        if p.count == 0 {
+            return Err(ErrorData::invalid_params("count는 1 이상이어야 함", None));
+        }
         self.store.with_session_edit(&p.doc_id, |session| {
+            let end = p
+                .char_offset
+                .checked_add(p.count)
+                .ok_or_else(|| ErrorData::invalid_params("char_offset + count 가 넘친다", None))?;
+            check_body_offset(&session.core, p.section, p.para, "char_offset + count", end)?;
             session
                 .core
                 .delete_text_native(p.section, p.para, p.char_offset, p.count)
@@ -894,6 +930,13 @@ impl HangulMcp {
         Parameters(p): Parameters<SplitParagraphParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
+            check_body_offset(
+                &session.core,
+                p.section,
+                p.para,
+                "char_offset",
+                p.char_offset,
+            )?;
             session
                 .core
                 .split_paragraph_native(p.section, p.para, p.char_offset, None)
@@ -1153,6 +1196,13 @@ impl HangulMcp {
             repeat_header: p.repeat_header,
         };
         self.store.with_session_edit(&p.doc_id, |session| {
+            check_body_offset(
+                &session.core,
+                p.section,
+                p.para,
+                "char_offset",
+                p.char_offset,
+            )?;
             session
                 .core
                 .create_table_with_options_native(
@@ -1407,6 +1457,13 @@ impl HangulMcp {
         );
 
         self.store.with_session_edit(&p.doc_id, |session| {
+            check_body_offset(
+                &session.core,
+                p.section,
+                p.para,
+                "char_offset",
+                p.char_offset,
+            )?;
             let section = session
                 .core
                 .document()
