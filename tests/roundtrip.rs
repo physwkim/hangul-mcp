@@ -2488,3 +2488,182 @@ fn render_page_rejects_bad_page_and_extension() {
     );
     assert!(!PathBuf::from(&svg).exists());
 }
+
+fn para0_text(server: &HangulMcp, doc_id: &str) -> String {
+    let out: Value = serde_json::from_str(
+        &server
+            .get_text(Parameters(GetTextParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para_start: Some(0),
+                para_end: Some(0),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out.to_string()
+}
+
+fn insert_at0(server: &HangulMcp, doc_id: &str, text: &str) {
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+            text: text.to_string(),
+        }))
+        .expect("insert_text");
+}
+
+fn history(out: Result<String, rmcp::ErrorData>) -> (u64, u64, bool) {
+    let v: Value = serde_json::from_str(&out.expect("undo/redo")).unwrap();
+    (
+        v["undo_available"].as_u64().unwrap(),
+        v["redo_available"].as_u64().unwrap(),
+        v["dirty"].as_bool().unwrap(),
+    )
+}
+
+fn undo(server: &HangulMcp, doc_id: &str) -> Result<String, rmcp::ErrorData> {
+    server.undo(Parameters(DocIdParams {
+        doc_id: doc_id.to_string(),
+    }))
+}
+
+fn redo(server: &HangulMcp, doc_id: &str) -> Result<String, rmcp::ErrorData> {
+    server.redo(Parameters(DocIdParams {
+        doc_id: doc_id.to_string(),
+    }))
+}
+
+fn save_to(server: &HangulMcp, doc_id: &str, name: &str) {
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.to_string(),
+            output_path: Some(temp_out(name)),
+        }))
+        .expect("save");
+}
+
+/// 미저장 표시는 "지금 상태 == 저장한 상태" 로 정해진다: 저장 시점으로 undo/redo 해
+/// 돌아오면 깨끗해지고, 거기서 벗어나면 다시 dirty 다.
+#[test]
+fn undo_redo_restore_text_and_track_saved_state() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let original = para0_text(&server, &doc_id);
+    insert_at0(&server, &doc_id, "가");
+    let edited = para0_text(&server, &doc_id);
+
+    assert_eq!(
+        history(undo(&server, &doc_id)),
+        (0, 1, false),
+        "열기 상태로 undo"
+    );
+    assert_eq!(para0_text(&server, &doc_id), original);
+    assert_eq!(history(redo(&server, &doc_id)), (1, 0, true), "redo");
+    assert_eq!(para0_text(&server, &doc_id), edited);
+
+    save_to(&server, &doc_id, "undo_saved.hwpx");
+    assert_eq!(
+        history(undo(&server, &doc_id)),
+        (0, 1, true),
+        "저장 뒤 undo 는 dirty"
+    );
+    assert_eq!(
+        history(redo(&server, &doc_id)),
+        (1, 0, false),
+        "저장 시점으로 redo"
+    );
+}
+
+/// 되돌린 뒤 새 편집: 다시 할 기록은 사라지고, 저장 때와 같은 깊이여도 다른 상태라 dirty.
+#[test]
+fn edit_after_undo_drops_redo_and_is_dirty_at_saved_depth() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_at0(&server, &doc_id, "가");
+    save_to(&server, &doc_id, "undo_branch.hwpx");
+    undo(&server, &doc_id).expect("undo");
+    insert_at0(&server, &doc_id, "나");
+    assert!(
+        redo(&server, &doc_id).is_err(),
+        "새 편집 뒤 redo 는 없어야 함"
+    );
+    let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
+    let entry = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["doc_id"] == doc_id.as_str())
+        .unwrap();
+    assert_eq!(
+        entry["dirty"], true,
+        "저장 깊이와 같지만 다른 상태: {entry}"
+    );
+}
+
+#[test]
+fn undo_redo_on_empty_history_is_rejected() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    assert!(undo(&server, &doc_id).is_err());
+    assert!(redo(&server, &doc_id).is_err());
+}
+
+/// 기록 상한(20): 21번 편집하면 가장 오래된 한 단계는 되돌릴 수 없다.
+#[test]
+fn undo_history_is_capped() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_at0(&server, &doc_id, "0");
+    let after_first = para0_text(&server, &doc_id);
+    for i in 1..=hangul_mcp::store::MAX_UNDO {
+        insert_at0(&server, &doc_id, &i.to_string());
+    }
+    for _ in 0..hangul_mcp::store::MAX_UNDO {
+        undo(&server, &doc_id).expect("상한 안의 undo");
+    }
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "상한을 넘는 undo 는 없어야 함"
+    );
+    assert_eq!(para0_text(&server, &doc_id), after_first);
+}
+
+/// 여러 rhwp 호출로 이뤄진 도구(그림 삽입 + 글자처럼 취급, 머리말 삭제 + 생성 + 입력)도
+/// undo 한 번에 통째로 되돌아가야 한다.
+#[test]
+fn undo_reverts_multi_step_tools_as_one_unit() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    set_hf(
+        &server,
+        &doc_id,
+        HeaderFooterKind::Footer,
+        None,
+        "옛 꼬리말",
+    )
+    .expect("footer 1");
+    set_hf(
+        &server,
+        &doc_id,
+        HeaderFooterKind::Footer,
+        None,
+        "새 꼬리말 {page}",
+    )
+    .expect("footer 2");
+    undo(&server, &doc_id).expect("undo footer");
+    let footer = get_hf(&server, &doc_id, HeaderFooterKind::Footer, None);
+    assert_eq!(footer["text"], "옛 꼬리말", "{footer}");
+
+    let (png_path, _) = sample_png("undo_pic.png");
+    server
+        .insert_picture(Parameters(picture_params(&doc_id, &png_path)))
+        .expect("insert_picture");
+    undo(&server, &doc_id).expect("undo picture");
+    for (ext, doc) in save_both(&server, &doc_id, "undo_pic") {
+        assert!(pictures(&doc).is_empty(), "{ext}: undo 뒤 그림이 남음");
+    }
+}

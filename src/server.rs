@@ -207,6 +207,15 @@ fn hf_display_text(para: &rhwp::model::paragraph::Paragraph) -> String {
     out
 }
 
+fn history_json(h: crate::store::HistoryStatus) -> String {
+    json!({
+        "undo_available": h.undo_available,
+        "redo_available": h.redo_available,
+        "dirty": h.dirty,
+    })
+    .to_string()
+}
+
 fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
@@ -826,7 +835,7 @@ impl HangulMcp {
         &self,
         Parameters(p): Parameters<SaveDocumentParams>,
     ) -> Result<String, ErrorData> {
-        self.store.with_session_mut(&p.doc_id, |session| {
+        self.store.with_session_save(&p.doc_id, |session| {
             let target = match &p.output_path {
                 Some(out) => PathBuf::from(out),
                 None => session.path.clone(),
@@ -852,7 +861,6 @@ impl HangulMcp {
             .map_err(hwp_err)?;
             std::fs::write(&target, &bytes)
                 .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
-            session.dirty = false;
             Ok(json!({
                 "saved_path": target.display().to_string(),
                 "bytes": bytes.len(),
@@ -911,6 +919,20 @@ impl HangulMcp {
             })
             .to_string())
         })
+    }
+
+    #[tool(
+        description = "이 문서에서 마지막으로 성공한 편집 도구 호출 하나를 통째로 되돌린다 (최대 20단계). 저장한 상태로 돌아오면 dirty=false가 된다."
+    )]
+    pub fn undo(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
+        self.store.undo(&p.doc_id).map(history_json)
+    }
+
+    #[tool(
+        description = "undo로 되돌린 편집을 다시 적용한다. undo 뒤 새 편집을 하면 다시 할 기록은 사라진다."
+    )]
+    pub fn redo(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
+        self.store.redo(&p.doc_id).map(history_json)
     }
 
     #[tool(description = "문서 세션을 닫는다. 저장하지 않은 변경은 버려진다.")]
@@ -2126,7 +2148,7 @@ impl HangulMcp {
                 .set_form_value_native(p.section, p.para, p.control, &value_json)
                 .map_err(hwp_err)?;
             // 네이티브는 폼이 아니어도 Ok({"ok":false})를 돌려준다 — 이때 Err로 바꿔
-            // dirty가 잘못 서지 않게 한다 (with_session_edit는 Ok일 때만 dirty 설정).
+            // 되돌리기 기록과 dirty가 잘못 남지 않게 한다 (with_session_edit는 Err면 편집 전으로 되돌린다).
             if result.contains(r#""ok":true"#) {
                 Ok(result)
             } else {
@@ -2159,8 +2181,12 @@ impl ServerHandler for HangulMcp {
                  글자 서식(색/굵게/크기/글꼴 등)은 apply_char_format, 문단 서식(정렬/줄 간격/여백 등)은 \
                  apply_para_format으로 바꾸고, 현재 서식은 get_char_format/get_para_format으로 본다. \
                  스타일(바탕글/개요 1 등)은 list_styles로 보고 apply_style로 건다. \
-                 모든 인덱스는 0-기반, 문자 위치는 char 단위다. \
-                 편집은 메모리에서만 일어나며 save_document 전에는 파일이 바뀌지 않는다.",
+                 표는 create_table/merge_table_cells/split_table_cell, 그림은 insert_picture, \
+                 쪽 나누기는 insert_break, 각주/미주는 insert_note, 머리말/꼬리말은 set_header_footer로 넣는다. \
+                 편집 결과는 render_page로 SVG/PDF를 그려 확인하고, 잘못된 편집은 undo로 되돌린다. \
+                 모든 인덱스는 0-기반, 문자 위치는 문단 텍스트의 char 단위다. \
+                 편집은 메모리에서만 일어나며 save_document 전에는 파일이 바뀌지 않는다. \
+                 편집 도구가 오류를 내면 문서는 호출 전 그대로다.",
             )
     }
 }
