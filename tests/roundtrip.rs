@@ -10,22 +10,22 @@ use hangul_mcp::format::{
 };
 use hangul_mcp::page::{Binding, Orientation, PageSetup};
 use hangul_mcp::placement::{
-    HorzAlign, HorzRelTo, ImageEffect, PictureFormat, Placement, TableFormat,
+    HorzAlign, HorzRelTo, ImageEffect, PictureFormat, Placement, ShapeFormat, TableFormat,
     TextWrap as PlacementWrap, VertRelTo,
 };
 use hangul_mcp::server::{
     AddBookmarkParams, ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams,
-    ApplyPictureFormatParams, ApplyStyleParams, ApplyTableFormatParams, BookmarkNameParams,
-    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, EquationAtParams,
-    ExportDocumentParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
+    ApplyPictureFormatParams, ApplyShapeFormatParams, ApplyStyleParams, ApplyTableFormatParams,
+    BookmarkNameParams, BreakKind, CreateTableParams, DeleteTextParams, DocIdParams,
+    EquationAtParams, ExportDocumentParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
     GetCellFormatParams, GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp,
     HeaderFooterKind, HeaderFooterPages, HeaderFooterParams, HyperlinkAtParams, InsertBreakParams,
     InsertEquationParams, InsertHyperlinkParams, InsertNoteParams, InsertPictureParams,
-    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, MergeParagraphParams,
-    MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams, ParaParams,
-    ParaTargetParams, RenameBookmarkParams, RenderPageParams, ReplaceTextParams,
+    InsertShapeParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
+    MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
+    ParaParams, ParaTargetParams, RenameBookmarkParams, RenderPageParams, ReplaceTextParams,
     SaveDocumentParams, SectionParams, SetCellTextParams, SetEquationParams, SetFieldValueParams,
-    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams,
+    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, ShapeKind, SplitParagraphParams,
     SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
@@ -4863,5 +4863,444 @@ fn delete_object_equation_roundtrip() {
             .filter(|c| matches!(c, rhwp::model::control::Control::Equation(_)))
             .count();
         assert_eq!(eqs, 0, "{ext}");
+    }
+}
+
+fn shape_params(doc_id: &str, kind: ShapeKind, size: (f64, f64)) -> InsertShapeParams {
+    InsertShapeParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        kind,
+        width_mm: size.0,
+        height_mm: size.1,
+        inline: None,
+        x_mm: None,
+        y_mm: None,
+        text: None,
+    }
+}
+
+fn insert_shape(
+    server: &HangulMcp,
+    p: InsertShapeParams,
+) -> Result<(usize, usize), rmcp::ErrorData> {
+    server.insert_shape(Parameters(p)).map(|out| {
+        let v: Value = serde_json::from_str(&out).unwrap();
+        (
+            v["para"].as_u64().unwrap() as usize,
+            v["control"].as_u64().unwrap() as usize,
+        )
+    })
+}
+
+fn get_shape_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+) -> ShapeFormat {
+    serde_json::from_str(
+        &server
+            .get_shape_format(Parameters(ObjectAtParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn apply_shape_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    format: ShapeFormat,
+) -> Result<String, rmcp::ErrorData> {
+    server.apply_shape_format(Parameters(ApplyShapeFormatParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+        format,
+    }))
+}
+
+/// 재파싱 문서 구역 0 의 유일한 도형.
+fn single_shape<'a>(
+    ext: &str,
+    doc: &'a rhwp::model::document::Document,
+) -> &'a rhwp::model::shape::ShapeObject {
+    let shapes: Vec<_> = doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .filter_map(|c| match c {
+            rhwp::model::control::Control::Shape(s) => Some(s.as_ref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shapes.len(), 1, "{ext} 도형 수");
+    shapes[0]
+}
+
+/// 떠 있는 사각형: 넣은 위치·크기가 조회되고, 배치(음수 오프셋 포함)·선·채우기·설명·대칭을
+/// 바꾸면 조회와 HWPX/HWP 저장 뒤에 같은 값으로 남는다 (tight 는 HWP 저장에서 square).
+#[test]
+fn shape_insert_and_format_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = insert_shape(
+        &server,
+        InsertShapeParams {
+            x_mm: Some(30.0),
+            y_mm: Some(40.0),
+            ..shape_params(&doc_id, ShapeKind::Rectangle, (50.0, 20.0))
+        },
+    )
+    .unwrap();
+    let before = get_shape_format(&server, &doc_id, at);
+    assert_eq!(
+        (
+            before.placement.inline,
+            before.placement.text_wrap,
+            before.placement.horz_rel_to,
+            before.placement.horz_offset_mm,
+            before.placement.vert_rel_to,
+            before.placement.vert_offset_mm,
+            before.width_mm,
+            before.height_mm,
+            before.fill_color.as_deref(),
+        ),
+        (
+            Some(false),
+            Some(PlacementWrap::InFrontOfText),
+            Some(HorzRelTo::Paper),
+            Some(30.0),
+            Some(VertRelTo::Paper),
+            Some(40.0),
+            Some(50.0),
+            Some(20.0),
+            Some("#ffffff"),
+        )
+    );
+    let change = ShapeFormat {
+        placement: Placement {
+            text_wrap: Some(PlacementWrap::Tight),
+            horz_rel_to: Some(HorzRelTo::Column),
+            horz_offset_mm: Some(-5.0),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(-3.0),
+            margin_left_mm: Some(1.5),
+            ..Default::default()
+        },
+        width_mm: Some(60.0),
+        height_mm: Some(25.0),
+        line_color: Some("#FF0000".to_string()),
+        line_width_mm: Some(0.5),
+        fill_color: Some("#00FF00".to_string()),
+        description: Some("바뀐 \"도형\"".to_string()),
+        vert_flip: Some(true),
+        ..Default::default()
+    };
+    let expected = ShapeFormat {
+        placement: Placement {
+            text_wrap: Some(PlacementWrap::Tight),
+            horz_rel_to: Some(HorzRelTo::Column),
+            horz_offset_mm: Some(-5.0),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(-3.0),
+            margin_left_mm: Some(1.5),
+            ..before.placement.clone()
+        },
+        width_mm: Some(60.0),
+        height_mm: Some(25.0),
+        line_color: Some("#ff0000".to_string()),
+        line_width_mm: Some(0.5),
+        fill_color: Some("#00ff00".to_string()),
+        description: Some("바뀐 \"도형\"".to_string()),
+        vert_flip: Some(true),
+        ..before.clone()
+    };
+    let out: ShapeFormat =
+        serde_json::from_str(&apply_shape_format(&server, &doc_id, at, change).unwrap()).unwrap();
+    assert_eq!(out, expected);
+    assert_eq!(get_shape_format(&server, &doc_id, at), expected);
+    for (ext, doc) in save_both(&server, &doc_id, "shape_format") {
+        let mut want = expected.clone();
+        if ext == "hwp" {
+            want.placement.text_wrap = Some(PlacementWrap::Square);
+        }
+        assert_eq!(
+            ShapeFormat::from_shape(single_shape(ext, &doc)),
+            want,
+            "{ext}"
+        );
+    }
+
+    apply_shape_format(
+        &server,
+        &doc_id,
+        at,
+        ShapeFormat {
+            fill_color: Some("none".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (ext, doc) in save_both(&server, &doc_id, "shape_fill_none") {
+        assert_eq!(
+            ShapeFormat::from_shape(single_shape(ext, &doc))
+                .fill_color
+                .as_deref(),
+            Some("none"),
+            "{ext}"
+        );
+    }
+}
+
+/// 회전은 크기와 따로: 도형 회전 각이 저장 뒤에도 남는다.
+#[test]
+fn shape_rotation_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = insert_shape(
+        &server,
+        shape_params(&doc_id, ShapeKind::Ellipse, (30.0, 20.0)),
+    )
+    .unwrap();
+    apply_shape_format(
+        &server,
+        &doc_id,
+        at,
+        ShapeFormat {
+            rotation_deg: Some(45),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_shape_format(&server, &doc_id, at).rotation_deg,
+        Some(45)
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "shape_rotate") {
+        let shape = single_shape(ext, &doc);
+        assert!(
+            matches!(shape, rhwp::model::shape::ShapeObject::Ellipse(_)),
+            "{ext} 타원 아님"
+        );
+        assert_eq!(
+            ShapeFormat::from_shape(shape).rotation_deg,
+            Some(45),
+            "{ext}"
+        );
+    }
+}
+
+/// 글상자 text 는 줄마다 문단이 되고(빈 줄 포함) 저장 뒤에도 남는다. 글자처럼 취급도 된다.
+#[test]
+fn textbox_text_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = insert_shape(
+        &server,
+        InsertShapeParams {
+            inline: Some(true),
+            text: Some("첫 줄\n\n셋째 줄".to_string()),
+            ..shape_params(&doc_id, ShapeKind::Textbox, (60.0, 30.0))
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_shape_format(&server, &doc_id, at).placement.inline,
+        Some(true)
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "textbox_text") {
+        let shape = single_shape(ext, &doc);
+        let texts: Vec<&str> = shape
+            .drawing()
+            .and_then(|d| d.text_box.as_ref())
+            .unwrap_or_else(|| panic!("{ext} 글상자 아님"))
+            .paragraphs
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect();
+        assert_eq!(texts, ["첫 줄", "", "셋째 줄"], "{ext}");
+        assert!(shape.common().treat_as_char, "{ext} 글자처럼 취급 아님");
+    }
+}
+
+/// 가로 직선(높이 0): 조회 결과를 그대로 되먹여도 되고, 채우기와 0 으로 줄이기는 거부된다.
+#[test]
+fn line_shape_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = insert_shape(&server, shape_params(&doc_id, ShapeKind::Line, (40.0, 0.0))).unwrap();
+    let got = get_shape_format(&server, &doc_id, at);
+    assert_eq!(
+        (got.width_mm, got.height_mm, got.fill_color.as_deref()),
+        (Some(40.0), Some(0.0), None)
+    );
+    apply_shape_format(&server, &doc_id, at, got.clone()).expect("조회 결과 되먹이기");
+    for bad in [
+        ShapeFormat {
+            fill_color: Some("#000000".to_string()),
+            ..Default::default()
+        },
+        ShapeFormat {
+            width_mm: Some(0.0),
+            ..Default::default()
+        },
+    ] {
+        let desc = format!("{bad:?}");
+        assert!(
+            apply_shape_format(&server, &doc_id, at, bad).is_err(),
+            "{desc}"
+        );
+    }
+    for (ext, doc) in save_both(&server, &doc_id, "line_shape") {
+        let shape = single_shape(ext, &doc);
+        assert!(
+            matches!(shape, rhwp::model::shape::ShapeObject::Line(_)),
+            "{ext} 직선 아님"
+        );
+        assert_eq!(ShapeFormat::from_shape(shape), got, "{ext}");
+    }
+}
+
+#[test]
+fn shape_tools_reject_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let len = para_text_of(&server, &doc_id, 0).chars().count();
+    let base = || shape_params(&doc_id, ShapeKind::Rectangle, (20.0, 10.0));
+    let bad_inserts = [
+        InsertShapeParams {
+            text: Some("글".to_string()),
+            ..base()
+        },
+        InsertShapeParams {
+            kind: ShapeKind::Textbox,
+            text: Some(String::new()),
+            ..base()
+        },
+        InsertShapeParams {
+            kind: ShapeKind::Textbox,
+            text: Some("탭\t문자".to_string()),
+            ..base()
+        },
+        InsertShapeParams {
+            width_mm: 0.0,
+            ..base()
+        },
+        InsertShapeParams {
+            kind: ShapeKind::Line,
+            width_mm: 0.0,
+            height_mm: 0.0,
+            ..base()
+        },
+        InsertShapeParams {
+            inline: Some(true),
+            x_mm: Some(10.0),
+            ..base()
+        },
+        InsertShapeParams {
+            y_mm: Some(-1.0),
+            ..base()
+        },
+        InsertShapeParams {
+            char_offset: len + 1,
+            ..base()
+        },
+    ];
+    for p in bad_inserts {
+        let desc = format!("{:?} {:?} {}", p.kind, p.text, p.char_offset);
+        assert!(insert_shape(&server, p).is_err(), "{desc}");
+    }
+
+    let at = insert_shape(&server, base()).unwrap();
+    let bad_formats = [
+        ShapeFormat::default(),
+        ShapeFormat {
+            placement: Placement {
+                horz_align: Some(HorzAlign::Inside),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ShapeFormat {
+            line_color: Some("red".to_string()),
+            ..Default::default()
+        },
+        ShapeFormat {
+            fill_color: Some("#12345".to_string()),
+            ..Default::default()
+        },
+        ShapeFormat {
+            line_width_mm: Some(10.5),
+            ..Default::default()
+        },
+        ShapeFormat {
+            height_mm: Some(0.0),
+            ..Default::default()
+        },
+        ShapeFormat {
+            rotation_deg: Some(-361),
+            ..Default::default()
+        },
+        ShapeFormat {
+            description: Some("두\n줄".to_string()),
+            ..Default::default()
+        },
+    ];
+    for f in bad_formats {
+        let desc = format!("{f:?}");
+        assert!(
+            apply_shape_format(&server, &doc_id, at, f).is_err(),
+            "{desc}"
+        );
+    }
+    let pic = insert_sample_picture(&server, &doc_id, "shape_reject.png");
+    assert!(server
+        .get_shape_format(Parameters(ObjectAtParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: pic.0,
+            control: pic.1,
+        }))
+        .is_err());
+    undo(&server, &doc_id).expect("undo insert_picture");
+    undo(&server, &doc_id).expect("undo insert_shape");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 도형 도구가 되돌리기 기록을 남김"
+    );
+}
+
+#[test]
+fn delete_object_shape_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let text = para_text_of(&server, &doc_id, 0);
+    let at = insert_shape(
+        &server,
+        InsertShapeParams {
+            text: Some("지울 글상자".to_string()),
+            ..shape_params(&doc_id, ShapeKind::Textbox, (40.0, 20.0))
+        },
+    )
+    .unwrap();
+    delete_object(&server, &doc_id, at.0, at.1).unwrap();
+    assert_eq!(para_text_of(&server, &doc_id, 0), text);
+    for (ext, doc) in save_both(&server, &doc_id, "shape_delete") {
+        let shapes = doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .filter(|c| matches!(c, rhwp::model::control::Control::Shape(_)))
+            .count();
+        assert_eq!(shapes, 0, "{ext}");
     }
 }

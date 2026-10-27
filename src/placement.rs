@@ -1,22 +1,24 @@
-//! 개체 배치(글자처럼 취급·본문과의 배치·가로/세로 기준과 정렬·오프셋·바깥 여백)와 표 서식.
+//! 개체 배치(글자처럼 취급·본문과의 배치·가로/세로 기준과 정렬·오프셋·바깥 여백)와
+//! 표·그림·도형 서식.
 //!
-//! 표와 그림은 rhwp 에서 같은 `CommonObjAttr` 배치 필드와 같은 속성 키(`treatAsChar`,
-//! `textWrap`, `horzRelTo` …)를 쓰므로 한 `Placement` 타입이 둘 다 맡는다. 개체마다 다른 것
-//! (바깥 여백 키, rhwp 가 받는 열거값)은 `PlacementTarget` 하나에 모은다. rhwp 는 받지 않는
+//! 표·그림·도형은 rhwp 에서 같은 `CommonObjAttr` 배치 필드와 같은 속성 키(`treatAsChar`,
+//! `textWrap`, `horzRelTo` …)를 쓰므로 한 `Placement` 타입이 모두 맡는다. 개체마다 다른 것
+//! (바깥 여백 키, rhwp 가 받는 열거값, 오프셋 표기)은 `PlacementTarget` 하나에 모은다. rhwp 는 받지 않는
 //! 열거 문자열을 오류 없이 무시하거나 다른 값으로 바꾸므로 여기서 먼저 거부한다.
 
 use rhwp::model::image::{ImageEffect as RImageEffect, Picture};
 use rhwp::model::shape::{
-    CommonObjAttr, HorzAlign as RHorzAlign, HorzRelTo as RHorzRelTo, TextWrap as RTextWrap,
-    VertAlign as RVertAlign, VertRelTo as RVertRelTo,
+    CommonObjAttr, HorzAlign as RHorzAlign, HorzRelTo as RHorzRelTo, ShapeObject,
+    TextWrap as RTextWrap, VertAlign as RVertAlign, VertRelTo as RVertRelTo,
 };
+use rhwp::model::style::FillType;
 use rhwp::model::table::Table;
 use rhwp::model::Padding;
 use rmcp::ErrorData;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::format::check_range;
+use crate::format::{check_color, check_range, color_bgr, color_css};
 use crate::page::{mm_to_hu, MAX_PAPER_MM};
 
 /// 여백·간격 한 변의 상한 (mm). HWPUNIT16(i16, 약 115mm) 안.
@@ -87,24 +89,43 @@ pub enum VertAlign {
 
 /// 배치를 받는 개체. rhwp 의 개체별 속성 setter 가 받는 키와 값이 다르다:
 /// 표(`set_table_properties_native`)는 tight/through 배치를 모르고, 그림
-/// (`set_picture_properties_native`)은 inside/outside 정렬을 모른다.
+/// (`set_picture_properties_native`)과 도형(`set_shape_properties_native`)은 inside/outside
+/// 정렬을 모른다. 도형은 오프셋을 부호 없는 정수로만 읽어 음수를 버린다.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PlacementTarget {
     Table,
     Picture,
+    Shape,
 }
 
 impl PlacementTarget {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Table => "표",
+            Self::Picture => "그림",
+            Self::Shape => "도형",
+        }
+    }
+
     /// 바깥 여백 키 (왼, 오른, 위, 아래).
     fn margin_keys(self) -> [&'static str; 4] {
         match self {
             Self::Table => ["outerLeft", "outerRight", "outerTop", "outerBottom"],
-            Self::Picture => [
+            Self::Picture | Self::Shape => [
                 "outerMarginLeft",
                 "outerMarginRight",
                 "outerMarginTop",
                 "outerMarginBottom",
             ],
+        }
+    }
+
+    /// 오프셋 값. HWP 의 오프셋은 부호 있는 HWPUNIT 를 u32 칸에 담는다(한컴 HWPX 도 음수를
+    /// 4294965296 처럼 쓴다). 도형 setter 는 u32 로만 읽으므로 같은 비트 패턴으로 넘긴다.
+    fn offset_value(self, hu: i32) -> Value {
+        match self {
+            Self::Table | Self::Picture => json!(hu),
+            Self::Shape => json!(hu as u32),
         }
     }
 }
@@ -239,13 +260,13 @@ impl Placement {
         }
         let inside_outside = |name: &str| {
             Err(ErrorData::invalid_params(
-                format!("그림의 {name} 은 inside/outside 를 쓸 수 없다"),
+                format!("{}의 {name} 은 inside/outside 를 쓸 수 없다", target.name()),
                 None,
             ))
         };
         if let Some(v) = self.horz_align {
             let name = match v {
-                HorzAlign::Inside | HorzAlign::Outside if target == PlacementTarget::Picture => {
+                HorzAlign::Inside | HorzAlign::Outside if target != PlacementTarget::Table => {
                     return inside_outside("horz_align")
                 }
                 HorzAlign::Left => "Left",
@@ -266,7 +287,7 @@ impl Placement {
         }
         if let Some(v) = self.vert_align {
             let name = match v {
-                VertAlign::Inside | VertAlign::Outside if target == PlacementTarget::Picture => {
+                VertAlign::Inside | VertAlign::Outside if target != PlacementTarget::Table => {
                     return inside_outside("vert_align")
                 }
                 VertAlign::Top => "Top",
@@ -283,7 +304,7 @@ impl Placement {
         ] {
             if let Some(v) = v {
                 check_range(name, v, -MAX_PAPER_MM, MAX_PAPER_MM)?;
-                props.insert(key.into(), json!(mm_to_hu(v).round() as i32));
+                props.insert(key.into(), target.offset_value(mm_to_hu(v).round() as i32));
             }
         }
         for ((name, v), key) in self.margins().into_iter().zip(target.margin_keys()) {
@@ -468,16 +489,7 @@ impl PictureFormat {
                 props.insert(key.into(), json!(mm_to_hu(v).round().max(1.0) as u32));
             }
         }
-        if let Some(d) = &self.description {
-            // rhwp 의 JSON 문자열 해석은 \uXXXX 이스케이프를 풀지 않는다.
-            if d.chars().any(char::is_control) {
-                return Err(ErrorData::invalid_params(
-                    "description 에 제어 문자(줄바꿈 포함)를 쓸 수 없다",
-                    None,
-                ));
-            }
-            props.insert("description".into(), json!(d));
-        }
+        put_description(&mut props, self.description.as_deref())?;
         for (name, key, v) in [
             ("brightness", "brightness", self.brightness),
             ("contrast", "contrast", self.contrast),
@@ -500,15 +512,180 @@ impl PictureFormat {
             };
             props.insert("effect".into(), json!(name));
         }
-        if let Some(v) = self.rotation_deg {
-            check_range("rotation_deg", f64::from(v), -360.0, 360.0)?;
-            props.insert("rotationAngle".into(), json!(v));
+        put_transform(
+            &mut props,
+            self.rotation_deg,
+            self.horz_flip,
+            self.vert_flip,
+        )?;
+        if props.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "format 에 바꿀 항목이 하나도 없다",
+                None,
+            ));
         }
-        for (key, v) in [("horzFlip", self.horz_flip), ("vertFlip", self.vert_flip)] {
+        Ok(Value::Object(props).to_string())
+    }
+}
+
+/// 그림·도형 설명(대체 텍스트).
+fn put_description(props: &mut Map<String, Value>, d: Option<&str>) -> Result<(), ErrorData> {
+    if let Some(d) = d {
+        // rhwp 의 JSON 문자열 해석은 \uXXXX 이스케이프를 풀지 않는다.
+        if d.chars().any(char::is_control) {
+            return Err(ErrorData::invalid_params(
+                "description 에 제어 문자(줄바꿈 포함)를 쓸 수 없다",
+                None,
+            ));
+        }
+        props.insert("description".into(), json!(d));
+    }
+    Ok(())
+}
+
+/// 그림·도형 회전 각과 대칭.
+fn put_transform(
+    props: &mut Map<String, Value>,
+    rotation_deg: Option<i16>,
+    horz_flip: Option<bool>,
+    vert_flip: Option<bool>,
+) -> Result<(), ErrorData> {
+    if let Some(v) = rotation_deg {
+        check_range("rotation_deg", f64::from(v), -360.0, 360.0)?;
+        props.insert("rotationAngle".into(), json!(v));
+    }
+    for (key, v) in [("horzFlip", horz_flip), ("vertFlip", vert_flip)] {
+        if let Some(v) = v {
+            props.insert(key.into(), json!(v));
+        }
+    }
+    Ok(())
+}
+
+/// 선 굵기 상한 (mm).
+const MAX_LINE_WIDTH_MM: f64 = 10.0;
+
+/// 색 없음 (HWPX "none").
+const NO_COLOR: u32 = 0xFFFF_FFFF;
+
+/// 도형 서식: 배치 + 크기·선·채우기·설명·회전·대칭. 적용 시 지정한 항목만 바뀐다.
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Default, PartialEq, Debug)]
+pub struct ShapeFormat {
+    #[serde(flatten)]
+    pub placement: Placement,
+    /// 도형 폭 (mm). 직선은 0 일 수 있다(세로선)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_mm: Option<f64>,
+    /// 도형 높이 (mm). 직선은 0 일 수 있다(가로선)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_mm: Option<f64>,
+    /// 선 색 ("#RRGGBB")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_color: Option<String>,
+    /// 선 굵기 (mm, 0..10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_width_mm: Option<f64>,
+    /// 채우기 색 ("#RRGGBB") 또는 "none"(채우기 없음). 직선에는 없다.
+    /// 그러데이션/그림 채우기는 조회에서 생략된다
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill_color: Option<String>,
+    /// 도형 설명(대체 텍스트). 제어 문자 불가
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 회전 각 (도, -360..360)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<i16>,
+    /// 좌우 대칭
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horz_flip: Option<bool>,
+    /// 상하 대칭
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_flip: Option<bool>,
+}
+
+impl ShapeFormat {
+    /// `shape` 는 그리기 개체(직선·사각형·타원·호·다각형·곡선)여야 한다.
+    pub fn from_shape(shape: &ShapeObject) -> Self {
+        let c = shape.common();
+        let d = shape.drawing().expect("그리기 개체");
+        let fill_color = match (&shape, d.fill.fill_type, &d.fill.solid) {
+            (ShapeObject::Line(_), _, _) => None,
+            (_, FillType::None, _) => Some("none".to_string()),
+            (_, FillType::Solid, Some(solid)) if solid.background_color == NO_COLOR => {
+                Some("none".to_string())
+            }
+            (_, FillType::Solid, Some(solid)) => Some(color_css(solid.background_color)),
+            _ => None,
+        };
+        Self {
+            placement: Placement::from_common(c, &c.margin),
+            width_mm: Some(hu_to_mm(c.width as f64)),
+            height_mm: Some(hu_to_mm(c.height as f64)),
+            line_color: Some(color_css(d.border_line.color)),
+            line_width_mm: Some(hu_to_mm(d.border_line.width as f64)),
+            fill_color,
+            description: Some(c.description.clone()),
+            rotation_deg: Some(d.shape_attr.rotation_angle),
+            horz_flip: Some(d.shape_attr.horz_flip),
+            vert_flip: Some(d.shape_attr.vert_flip),
+        }
+    }
+
+    /// rhwp `set_shape_properties_native` 속성 JSON. 값을 모두 검증한 뒤에 만든다.
+    /// rhwp 는 0 크기를 오류 없이 최소 크기로 바꾸므로, 0 은 이미 0 인 변(직선)에만 받는다.
+    pub fn to_rhwp_json(&self, shape: &ShapeObject) -> Result<String, ErrorData> {
+        let mut props = Map::new();
+        self.placement.put(&mut props, PlacementTarget::Shape)?;
+        let c = shape.common();
+        for (name, key, v, current) in [
+            ("width_mm", "width", self.width_mm, c.width),
+            ("height_mm", "height", self.height_mm, c.height),
+        ] {
             if let Some(v) = v {
-                props.insert(key.into(), json!(v));
+                check_range(name, v, 0.0, MAX_PAPER_MM)?;
+                let hu = mm_to_hu(v).round() as u32;
+                if hu == 0 && current != 0 {
+                    return Err(ErrorData::invalid_params(
+                        format!("{name} 을 0 으로 줄일 수 없다 (0 은 직선을 넣을 때만)"),
+                        None,
+                    ));
+                }
+                props.insert(key.into(), json!(hu));
             }
         }
+        if let Some(v) = &self.line_color {
+            check_color("line_color", v)?;
+            props.insert("borderColor".into(), json!(color_bgr(v)));
+        }
+        if let Some(v) = self.line_width_mm {
+            check_range("line_width_mm", v, 0.0, MAX_LINE_WIDTH_MM)?;
+            props.insert("borderWidth".into(), json!(mm_to_hu(v).round() as i32));
+        }
+        if let Some(v) = &self.fill_color {
+            if matches!(shape, ShapeObject::Line(_)) {
+                return Err(ErrorData::invalid_params(
+                    "직선에는 fill_color 를 쓸 수 없다",
+                    None,
+                ));
+            }
+            if v == "none" {
+                // HWPX 는 채우기 없음을 winBrush faceColor="none" 으로 쓰고 읽으면 단색 NO_COLOR
+                // 가 된다. rhwp 는 채우기 종류 none 에도 남은 단색 값을 그대로 써 넣으므로 색도 지운다.
+                props.insert("fillType".into(), json!("none"));
+                props.insert("fillBgColor".into(), json!(NO_COLOR as i32));
+            } else {
+                check_color("fill_color", v)?;
+                props.insert("fillType".into(), json!("solid"));
+                props.insert("fillBgColor".into(), json!(color_bgr(v)));
+            }
+        }
+        put_description(&mut props, self.description.as_deref())?;
+        put_transform(
+            &mut props,
+            self.rotation_deg,
+            self.horz_flip,
+            self.vert_flip,
+        )?;
         if props.is_empty() {
             return Err(ErrorData::invalid_params(
                 "format 에 바꿀 항목이 하나도 없다",

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use rhwp::document_core::hyperlink::HyperlinkTarget;
 use rhwp::model::control::{Control, FormObject, FormType};
 use rhwp::model::document::Document;
+use rhwp::model::shape::ShapeObject;
 use rhwp::DocumentCore;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -25,7 +26,7 @@ use crate::format::{
     ParaFormat,
 };
 use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
-use crate::placement::{PictureFormat, TableFormat};
+use crate::placement::{PictureFormat, ShapeFormat, TableFormat};
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
@@ -550,6 +551,40 @@ fn not_picture(section: usize, para: usize, control: usize) -> ErrorData {
         format!("문단 {section}/{para} 의 컨트롤 {control} 은 그림이 아니다"),
         None,
     )
+}
+
+/// 본문 문단 (section, para) 의 컨트롤 control 인 그리기 개체(직선/사각형/타원/호/다각형/곡선,
+/// 글상자는 글을 담은 사각형). 묶음·그림·차트·OLE 는 선과 채우기가 이 서식의 뜻과 달라 받지 않는다.
+fn shape_at(
+    doc: &Document,
+    section: usize,
+    para: usize,
+    control: usize,
+) -> Result<&ShapeObject, ErrorData> {
+    match paragraph_at(doc, section, para, None)?
+        .controls
+        .get(control)
+    {
+        Some(Control::Shape(shape))
+            if matches!(
+                shape.as_ref(),
+                ShapeObject::Line(_)
+                    | ShapeObject::Rectangle(_)
+                    | ShapeObject::Ellipse(_)
+                    | ShapeObject::Arc(_)
+                    | ShapeObject::Polygon(_)
+                    | ShapeObject::Curve(_)
+            ) =>
+        {
+            Ok(shape)
+        }
+        _ => Err(ErrorData::invalid_params(
+            format!(
+                "문단 {section}/{para} 의 컨트롤 {control} 은 그리기 개체(직선/사각형/타원/호/다각형/곡선/글상자)가 아니다"
+            ),
+            None,
+        )),
+    }
 }
 
 /// 본문 문단, 또는 cell 이면 그 표 셀 문단의 양식 개체.
@@ -1088,6 +1123,58 @@ pub struct ApplyPictureFormatParams {
     pub control: usize,
     /// 적용할 그림 서식 (get_picture_format 결과와 같은 모양, 지정한 항목만 바뀐다)
     pub format: PictureFormat,
+}
+
+/// 넣을 도형 종류.
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeKind {
+    Rectangle,
+    Ellipse,
+    /// 직선: 상자의 왼쪽 위에서 오른쪽 아래로 (폭이나 높이 0 이면 세로선/가로선)
+    Line,
+    /// 글상자: 글을 담은 사각형
+    Textbox,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertShapeParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 도형을 넣을 본문 문단 인덱스
+    pub para: usize,
+    /// 문단 내 삽입 위치 (char 단위)
+    pub char_offset: usize,
+    /// 도형 종류
+    pub kind: ShapeKind,
+    /// 폭 (mm). 직선만 0 가능
+    pub width_mm: f64,
+    /// 높이 (mm). 직선만 0 가능
+    pub height_mm: f64,
+    /// true면 글자처럼 취급, false(기본)면 x_mm/y_mm 위치(용지 기준)에 글 앞으로 떠 있는 도형
+    pub inline: Option<bool>,
+    /// 떠 있는 도형의 가로 위치 (용지 왼쪽에서 mm, inline=false일 때만). 생략 시 본문 왼쪽
+    pub x_mm: Option<f64>,
+    /// 떠 있는 도형의 세로 위치 (용지 위쪽에서 mm, inline=false일 때만). 생략 시 본문 위쪽
+    pub y_mm: Option<f64>,
+    /// 글상자 내용 (kind=textbox일 때만). 줄바꿈(\n)마다 문단이 나뉜다
+    pub text: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyShapeFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 도형이 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스 (get_structure objects 의 control 값)
+    pub control: usize,
+    /// 적용할 도형 서식 (get_shape_format 결과와 같은 모양, 지정한 항목만 바뀐다)
+    pub format: ShapeFormat,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2762,6 +2849,38 @@ impl HangulMcp {
     }
 
     #[tool(
+        description = "도형 서식을 반환한다: 배치(inline, text_wrap, horz/vert_rel_to·align·offset_mm, 바깥 margin_*_mm), width_mm/height_mm, line_color, line_width_mm, fill_color(\"#RRGGBB\" 또는 \"none\", 직선과 그러데이션/그림 채우기는 생략), description, rotation_deg, horz_flip/vert_flip. 결과는 apply_shape_format의 format 입력과 같은 모양."
+    )]
+    pub fn get_shape_format(
+        &self,
+        Parameters(p): Parameters<ObjectAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let shape = shape_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(ShapeFormat::from_shape(shape)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "도형(직선/사각형/타원/호/다각형/곡선/글상자) 서식을 바꾼다: inline, text_wrap(square/tight/through/top_and_bottom/behind_text/in_front_of_text; tight/through는 HWPX에만 저장되고 .hwp 저장에서는 square가 된다), horz_rel_to·horz_align(left/center/right)·horz_offset_mm, vert_rel_to·vert_align(top/center/bottom)·vert_offset_mm(음수 가능), margin_*_mm, width_mm/height_mm, line_color, line_width_mm(0..10), fill_color(\"#RRGGBB\"/\"none\", 직선 제외), description, rotation_deg, horz_flip/vert_flip. 지정한 항목만 바뀐다."
+    )]
+    pub fn apply_shape_format(
+        &self,
+        Parameters(p): Parameters<ApplyShapeFormatParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let shape = shape_at(session.core.document(), p.section, p.para, p.control)?;
+            let props = p.format.to_rhwp_json(shape)?;
+            session
+                .core
+                .set_shape_properties_native(p.section, p.para, p.control, &props)
+                .map_err(hwp_err)?;
+            let shape = shape_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(ShapeFormat::from_shape(shape)).to_string())
+        })
+    }
+
+    #[tool(
         description = "표 셀의 서식을 반환한다: background, border_left/right/top/bottom(style·width_mm·color), vertical_align, padding_*_mm(실제 쓰이는 안 여백), header. 결과는 apply_cell_format의 format 입력과 같은 모양."
     )]
     pub fn get_cell_format(
@@ -3189,6 +3308,142 @@ impl HangulMcp {
                     .map_err(hwp_err)?;
             }
             Ok(out)
+        })
+    }
+
+    #[tool(
+        description = "본문 문단의 char_offset 위치에 도형(kind: rectangle/ellipse/line/textbox)을 넣는다. 크기는 width_mm/height_mm(직선만 0 가능). inline=false(기본)면 x_mm/y_mm 위치(용지 기준)에 글 앞으로 떠 있고, true면 글자처럼 취급. textbox는 text로 내용을 채운다(\\n마다 문단). 선·채우기·배치는 apply_shape_format으로 바꾼다. 결과 {para, control}."
+    )]
+    pub fn insert_shape(
+        &self,
+        Parameters(p): Parameters<InsertShapeParams>,
+    ) -> Result<String, ErrorData> {
+        let inline = p.inline.unwrap_or(false);
+        let min_size = if p.kind == ShapeKind::Line { 0.0 } else { 0.1 };
+        check_range("width_mm", p.width_mm, min_size, MAX_PAPER_MM)?;
+        check_range("height_mm", p.height_mm, min_size, MAX_PAPER_MM)?;
+        let (width, height) = (
+            mm_to_hu(p.width_mm).round() as u32,
+            mm_to_hu(p.height_mm).round() as u32,
+        );
+        if width == 0 && height == 0 {
+            return Err(ErrorData::invalid_params(
+                "직선의 width_mm 와 height_mm 가 모두 0 이다",
+                None,
+            ));
+        }
+        for (name, v) in [("x_mm", p.x_mm), ("y_mm", p.y_mm)] {
+            if let Some(v) = v {
+                check_range(name, v, 0.0, MAX_PAPER_MM)?;
+            }
+        }
+        if inline && (p.x_mm.is_some() || p.y_mm.is_some()) {
+            return Err(ErrorData::invalid_params(
+                "x_mm/y_mm은 inline=false일 때만 쓸 수 있음",
+                None,
+            ));
+        }
+        let lines: Vec<&str> = match &p.text {
+            None => Vec::new(),
+            Some(_) if p.kind != ShapeKind::Textbox => {
+                return Err(ErrorData::invalid_params(
+                    "text 는 kind=textbox 일 때만 쓸 수 있다",
+                    None,
+                ))
+            }
+            Some(t) if t.is_empty() => {
+                return Err(ErrorData::invalid_params("text 가 비었다", None))
+            }
+            Some(t) if t.chars().any(|c| c.is_control() && c != '\n') => {
+                return Err(ErrorData::invalid_params(
+                    "text 에 줄바꿈(\\n) 외의 제어 문자를 쓸 수 없다",
+                    None,
+                ))
+            }
+            Some(t) => t.split('\n').collect(),
+        };
+        let kind = match p.kind {
+            ShapeKind::Rectangle => "rectangle",
+            ShapeKind::Ellipse => "ellipse",
+            ShapeKind::Line => "line",
+            ShapeKind::Textbox => "textbox",
+        };
+
+        self.store.with_session_edit(&p.doc_id, |session| {
+            check_offset(
+                &session.core,
+                p.section,
+                p.para,
+                None,
+                "char_offset",
+                p.char_offset,
+            )?;
+            let section = session
+                .core
+                .document()
+                .sections
+                .get(p.section)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(format!("구역 {} 없음", p.section), None)
+                })?;
+            let (x, y) = if inline {
+                (0, 0)
+            } else {
+                let body =
+                    rhwp::model::page::PageAreas::from_page_def(&section.section_def.page_def)
+                        .body_area;
+                (
+                    p.x_mm.map_or(body.left, |v| mm_to_hu(v).round() as i32),
+                    p.y_mm.map_or(body.top, |v| mm_to_hu(v).round() as i32),
+                )
+            };
+            let out = session
+                .core
+                .create_shape_control_native(
+                    p.section,
+                    p.para,
+                    p.char_offset,
+                    width,
+                    height,
+                    x as u32,
+                    y as u32,
+                    inline,
+                    "InFrontOfText",
+                    kind,
+                    false,
+                    false,
+                    &[],
+                )
+                .map_err(hwp_err)?;
+            let v: Value = serde_json::from_str(&out).map_err(|e| {
+                ErrorData::internal_error(format!("insert_shape 결과 해석 실패: {e}"), None)
+            })?;
+            let (para, ctrl) = match (v["paraIdx"].as_u64(), v["controlIdx"].as_u64()) {
+                (Some(para), Some(ctrl)) => (para as usize, ctrl as usize),
+                _ => {
+                    return Err(ErrorData::internal_error(
+                        format!("insert_shape 결과에 paraIdx/controlIdx 없음: {out}"),
+                        None,
+                    ))
+                }
+            };
+            // 글상자 문단은 rhwp 셀 편집 API 가 cell 0 으로 가리킨다.
+            for (i, line) in lines.iter().enumerate() {
+                if i > 0 {
+                    let prev = lines[i - 1].chars().count();
+                    session
+                        .core
+                        .split_paragraph_in_cell_native(p.section, para, ctrl, 0, i - 1, prev, None)
+                        .map_err(hwp_err)?;
+                }
+                if !line.is_empty() {
+                    session
+                        .core
+                        .insert_text_in_cell_native(p.section, para, ctrl, 0, i, 0, line)
+                        .map_err(hwp_err)?;
+                }
+            }
+            Ok(json!({"para": para, "control": ctrl}).to_string())
         })
     }
 
