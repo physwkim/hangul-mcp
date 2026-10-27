@@ -75,7 +75,7 @@ pub struct OpenDocumentParams {
 pub struct SaveDocumentParams {
     /// open_document가 반환한 문서 핸들
     pub doc_id: String,
-    /// 저장 경로. 생략하면 원본 경로를 덮어쓴다. 확장자는 .hwpx여야 한다.
+    /// 저장 경로. 생략하면 원본 경로를 덮어쓴다. 확장자(.hwpx / .hwp)로 저장 형식을 고른다.
     pub output_path: Option<String>,
 }
 
@@ -371,7 +371,9 @@ impl HangulMcp {
         .to_string())
     }
 
-    #[tool(description = "문서를 HWPX 파일로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다.")]
+    #[tool(
+        description = "문서를 저장한다. 경로 확장자가 .hwpx면 HWPX, .hwp면 HWP 5.0 바이너리로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다."
+    )]
     pub fn save_document(
         &self,
         Parameters(p): Parameters<SaveDocumentParams>,
@@ -381,7 +383,25 @@ impl HangulMcp {
                 Some(out) => PathBuf::from(out),
                 None => session.path.clone(),
             };
-            let bytes = session.core.export_hwpx_native().map_err(hwp_err)?;
+            let ext = target
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase);
+            let bytes = match ext.as_deref() {
+                Some("hwpx") => session.core.export_hwpx_native(),
+                // HWPX 출처 IR 은 HWP 호환 형태로 바꿔야 직렬화가 맞는다 (rhwp #178).
+                Some("hwp") => session.core.export_hwp_with_adapter(),
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "저장 경로 확장자는 .hwpx 또는 .hwp여야 한다: {}",
+                            target.display()
+                        ),
+                        None,
+                    ))
+                }
+            }
+            .map_err(hwp_err)?;
             std::fs::write(&target, &bytes)
                 .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
             session.dirty = false;

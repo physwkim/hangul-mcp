@@ -2,7 +2,7 @@
 
 An MCP (Model Context Protocol) server for editing HWPX documents, built on
 [rhwp](https://github.com/edwardkim/rhwp). It opens `.hwpx` (or `.hwp`) files,
-edits them in memory, and saves them back as HWPX.
+edits them in memory, and saves them as HWPX or HWP.
 
 ## Requirements
 
@@ -47,7 +47,7 @@ MCP protocol over stdio and takes no arguments.
 1. `open_document(path)` → returns a `doc_id`
 2. `get_structure(doc_id)` → learn the editing coordinates (section/para/control)
 3. Call editing tools (changes stay in memory)
-4. `save_document(doc_id, output_path?)` → write HWPX
+4. `save_document(doc_id, output_path?)` → write HWPX or HWP (chosen by the `.hwpx` / `.hwp` extension)
 
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
@@ -59,7 +59,7 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | Tool | Description |
 |------|-------------|
 | `open_document(path)` | Open a document → `{doc_id, sections, paragraphs_per_section, page_count}` |
-| `save_document(doc_id, output_path?)` | Save as HWPX. Overwrites the original when `output_path` is omitted |
+| `save_document(doc_id, output_path?)` | Save as HWPX or HWP 5.0, chosen by the path extension (`.hwpx` / `.hwp`). Overwrites the original when `output_path` is omitted |
 | `close_document(doc_id)` | Close the session. Unsaved changes are discarded, and the result says so |
 | `list_documents()` | Open documents and their dirty state |
 | `server_info()` | Build info: this crate's version, plus the rhwp version and source (git rev) it was built against |

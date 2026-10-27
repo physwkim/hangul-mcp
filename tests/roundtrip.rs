@@ -685,3 +685,81 @@ fn server_info_reports_pinned_rhwp_rev() {
         ),
     }
 }
+
+fn section0_text(doc: &rhwp::model::document::Document) -> String {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect()
+}
+
+/// `.hwp` 경로로 저장하면 HWP 5.0 바이너리가 나와야 하고, 그 뒤 같은 세션을
+/// `.hwpx` 로 다시 저장해도 편집 내용이 유지돼야 한다 — HWP 어댑터는 세션 IR 을
+/// 제자리에서 바꾸므로 이후 HWPX 저장 경로가 깨지지 않는지가 경계다.
+#[test]
+fn save_as_hwp_then_hwpx_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+            text: "HWP저장마커".to_string(),
+        }))
+        .expect("insert_text");
+
+    let hwp_path = temp_out("save_as.hwp");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(hwp_path.clone()),
+        }))
+        .expect("save_document .hwp");
+    let hwp_bytes = std::fs::read(&hwp_path).unwrap();
+    assert!(
+        matches!(
+            rhwp::parser::detect_format(&hwp_bytes),
+            rhwp::parser::FileFormat::Hwp
+        ),
+        "HWP 바이너리가 아님"
+    );
+    let hwp_doc = rhwp::parser::parse_hwp(&hwp_bytes).expect("HWP 저장본 재파싱");
+    let text = section0_text(&hwp_doc);
+    assert!(
+        text.contains("HWP저장마커"),
+        "HWP 저장본에 마커 없음: {text:?}"
+    );
+
+    let hwpx_path = temp_out("save_as_after_hwp.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(hwpx_path.clone()),
+        }))
+        .expect("save_document .hwpx");
+    let hwpx_doc = rhwp::parser::hwpx::parse_hwpx(&std::fs::read(&hwpx_path).unwrap())
+        .expect("HWPX 저장본 재파싱");
+    let text = section0_text(&hwpx_doc);
+    assert!(
+        text.contains("HWP저장마커"),
+        "HWPX 저장본에 마커 없음: {text:?}"
+    );
+}
+
+#[test]
+fn save_rejects_unknown_extension() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let out_path = temp_out("save_as.docx");
+    let err = server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id,
+            output_path: Some(out_path.clone()),
+        }))
+        .expect_err(".docx 저장은 거부돼야 함");
+    assert!(err.message.contains(".hwp"), "에러 메시지: {err:?}");
+    assert!(!PathBuf::from(&out_path).exists(), "거부했는데 파일이 생김");
+}
