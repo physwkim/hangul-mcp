@@ -4090,6 +4090,23 @@ fn export_document_pdf_txt_page_ranges() {
     );
 }
 
+/// 표 셀 안 그림(picture_in_cell.hwpx: rhwp issue3587/d-pi2-import.hwpx)도 빠지지 않고,
+/// rhwp Markdown 추출 규칙대로 그 표 바로 뒤에 링크로 나온다.
+#[test]
+fn export_markdown_keeps_picture_in_table_cell() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("picture_in_cell.hwpx"));
+    let path = temp_out("cell_pic.md");
+    let out = export(&server, &doc_id, &path, (None, None)).unwrap();
+    assert_eq!(out["images"].as_array().unwrap().len(), 1, "{out}");
+    let md = std::fs::read_to_string(&path).unwrap();
+    let table_end = md.rfind("|\n").expect("표 없음");
+    let link = md
+        .find("![image](cell_pic_assets/img001.")
+        .expect("그림 링크 없음");
+    assert!(link > table_end, "그림이 표 뒤가 아님:\n{md}");
+}
+
 /// Markdown: 표는 Markdown 표로, 그림은 <이름>_assets/ 에 원본 바이트로 쓰고 링크한다.
 #[test]
 fn export_document_markdown_tables_and_images() {
