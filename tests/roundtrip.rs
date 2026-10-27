@@ -10,11 +10,13 @@ use hangul_mcp::format::{
 use hangul_mcp::server::{
     ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, BreakKind, CreateTableParams,
     DeleteTextParams, DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
-    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, InsertBreakParams,
+    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
+    HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams,
-    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
-    SplitParagraphParams, SplitTableCellParams, StyleRef,
+    MergeTableCellsParams, NoteKind, OpenDocumentParams, ParaParams, ParaTargetParams,
+    ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
+    SetFormValueParams, SetHeaderFooterParams, SplitParagraphParams, SplitTableCellParams,
+    StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -2157,4 +2159,255 @@ fn insert_break_offset_is_text_chars_and_bounded() {
         assert_eq!(para_texts(&doc), ["안녕 ", "Hello 123"], "{ext}");
         assert_eq!(paras_with_picture(&doc), [0], "{ext}");
     }
+}
+
+fn note_params(
+    doc_id: &str,
+    char_offset: usize,
+    text: &str,
+    kind: Option<NoteKind>,
+) -> InsertNoteParams {
+    InsertNoteParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para: 0,
+        char_offset,
+        text: text.to_string(),
+        kind,
+    }
+}
+
+/// 문단 0 의 주석 컨트롤을 (종류, 번호, 첫 문단 텍스트) 로, 문단 내 순서대로.
+fn notes(doc: &rhwp::model::document::Document) -> Vec<(&'static str, u16, String)> {
+    doc.sections[0].paragraphs[0]
+        .controls
+        .iter()
+        .filter_map(|c| match c {
+            rhwp::model::control::Control::Footnote(f) => {
+                Some(("footnote", f.number, f.paragraphs[0].text.clone()))
+            }
+            rhwp::model::control::Control::Endnote(e) => {
+                Some(("endnote", e.number, e.paragraphs[0].text.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// 각주 두 개(뒤쪽을 먼저 넣음)와 미주 하나: 번호는 문서 순서로 다시 매겨지고,
+/// 내용은 번호 자리표시("  ") 뒤에 들어가야 한다.
+#[test]
+fn insert_note_footnote_and_endnote_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    server
+        .insert_note(Parameters(note_params(&doc_id, 8, "뒤 각주", None)))
+        .expect("footnote 1");
+    server
+        .insert_note(Parameters(note_params(
+            &doc_id,
+            2,
+            "앞 각주",
+            Some(NoteKind::Footnote),
+        )))
+        .expect("footnote 2");
+    server
+        .insert_note(Parameters(note_params(
+            &doc_id,
+            12,
+            "미주 내용",
+            Some(NoteKind::Endnote),
+        )))
+        .expect("endnote");
+
+    for (ext, doc) in save_both(&server, &doc_id, "notes") {
+        assert_eq!(
+            notes(&doc),
+            [
+                ("footnote", 1, "  앞 각주".to_string()),
+                ("footnote", 2, "  뒤 각주".to_string()),
+                ("endnote", 1, "  미주 내용".to_string()),
+            ],
+            "{ext}"
+        );
+        assert_eq!(
+            doc.sections[0].paragraphs[0].text, "안녕 Hello 123",
+            "{ext} 본문 텍스트"
+        );
+    }
+}
+
+#[test]
+fn insert_note_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    assert!(server
+        .insert_note(Parameters(note_params(&doc_id, 13, "x", None)))
+        .is_err());
+    assert!(server
+        .insert_note(Parameters(note_params(&doc_id, 0, "두\n줄", None)))
+        .is_err());
+    for (ext, doc) in save_both(&server, &doc_id, "notes_rejected") {
+        assert!(notes(&doc).is_empty(), "{ext}: 거부된 호출이 주석을 남김");
+    }
+}
+
+fn hf_params(
+    doc_id: &str,
+    kind: HeaderFooterKind,
+    pages: Option<HeaderFooterPages>,
+) -> HeaderFooterParams {
+    HeaderFooterParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        kind,
+        pages,
+    }
+}
+
+fn set_hf(
+    server: &HangulMcp,
+    doc_id: &str,
+    kind: HeaderFooterKind,
+    pages: Option<HeaderFooterPages>,
+    text: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.set_header_footer(Parameters(SetHeaderFooterParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        kind,
+        pages,
+        text: text.to_string(),
+    }))
+}
+
+fn get_hf(
+    server: &HangulMcp,
+    doc_id: &str,
+    kind: HeaderFooterKind,
+    pages: Option<HeaderFooterPages>,
+) -> Value {
+    serde_json::from_str(
+        &server
+            .get_header_footer(Parameters(hf_params(doc_id, kind, pages)))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// 저장본의 (머리말 여부, 적용 쪽, 필드 컨트롤 종류) 목록.
+fn header_footers(doc: &rhwp::model::document::Document) -> Vec<(bool, String, Vec<String>)> {
+    use rhwp::model::control::Control;
+    let fields = |paras: &[rhwp::model::paragraph::Paragraph]| -> Vec<String> {
+        paras
+            .iter()
+            .flat_map(|p| &p.controls)
+            .filter_map(|c| match c {
+                Control::AutoNumber(a) => Some(format!("{:?}", a.number_type)),
+                Control::Field(f) => Some(format!("{:?}", f.field_type)),
+                _ => None,
+            })
+            .collect()
+    };
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .filter_map(|c| match c {
+            Control::Header(h) => Some((true, format!("{:?}", h.apply_to), fields(&h.paragraphs))),
+            Control::Footer(f) => Some((false, format!("{:?}", f.apply_to), fields(&f.paragraphs))),
+            _ => None,
+        })
+        .collect()
+}
+
+const FOOTER_TEXT: &str = "- {page} / {total_pages} - {file_name}";
+
+/// 머리말(양쪽) + 꼬리말(홀수 쪽, 필드 셋). 꼬리말은 두 번 설정해 교체를 확인한다.
+/// 필드는 편집 중엔 마커, 저장본에선 자동 번호/파일 경로 컨트롤인데, 어느 쪽이든
+/// get_header_footer 는 같은 자리표시자 표기를 돌려줘야 한다.
+#[test]
+fn set_header_footer_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let odd = Some(HeaderFooterPages::Odd);
+    set_hf(
+        &server,
+        &doc_id,
+        HeaderFooterKind::Header,
+        None,
+        "보고서 머리말",
+    )
+    .expect("header");
+    set_hf(&server, &doc_id, HeaderFooterKind::Footer, odd, "옛 꼬리말").expect("footer 1");
+    set_hf(&server, &doc_id, HeaderFooterKind::Footer, odd, FOOTER_TEXT).expect("footer 2");
+
+    let footer = get_hf(&server, &doc_id, HeaderFooterKind::Footer, odd);
+    assert_eq!(footer["text"], FOOTER_TEXT, "편집 중 get: {footer}");
+    let both_footer = get_hf(&server, &doc_id, HeaderFooterKind::Footer, None);
+    assert_eq!(
+        both_footer["exists"], false,
+        "양쪽 꼬리말은 없어야 함: {both_footer}"
+    );
+
+    for (ext, doc) in save_both(&server, &doc_id, "header_footer") {
+        let mut hfs = header_footers(&doc);
+        hfs.sort();
+        assert_eq!(
+            hfs,
+            [
+                (
+                    false,
+                    "Odd".to_string(),
+                    vec![
+                        "Page".to_string(),
+                        "TotalPage".to_string(),
+                        "Path".to_string()
+                    ]
+                ),
+                (true, "Both".to_string(), vec![]),
+            ],
+            "{ext}"
+        );
+        let (reopened, _) = open(&server, &temp_out(&format!("header_footer.{ext}")));
+        let header = get_hf(&server, &reopened, HeaderFooterKind::Header, None);
+        assert_eq!(
+            header["text"], "보고서 머리말",
+            "{ext} 다시 연 머리말: {header}"
+        );
+        let footer = get_hf(&server, &reopened, HeaderFooterKind::Footer, odd);
+        assert_eq!(
+            footer["text"], FOOTER_TEXT,
+            "{ext} 다시 연 꼬리말: {footer}"
+        );
+    }
+
+    server
+        .delete_header_footer(Parameters(hf_params(
+            &doc_id,
+            HeaderFooterKind::Header,
+            None,
+        )))
+        .expect("delete header");
+    let header = get_hf(&server, &doc_id, HeaderFooterKind::Header, None);
+    assert_eq!(header["exists"], false, "삭제 후: {header}");
+}
+
+#[test]
+fn set_header_footer_rejects_multiline() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    assert!(set_hf(
+        &server,
+        &doc_id,
+        HeaderFooterKind::Header,
+        None,
+        "한\n줄 아님"
+    )
+    .is_err());
+    let header = get_hf(&server, &doc_id, HeaderFooterKind::Header, None);
+    assert_eq!(
+        header["exists"], false,
+        "거부된 호출이 머리말을 만듦: {header}"
+    );
 }

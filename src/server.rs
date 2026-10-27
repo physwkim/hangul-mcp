@@ -103,6 +103,110 @@ fn body_split_offset(
     Ok(char_offset + slots_before)
 }
 
+/// 머리말/꼬리말 text 의 자리표시자와 rhwp 필드 종류(insert_field_in_hf_native) / 저장 문자.
+const HF_FIELDS: [(&str, u8, char); 3] = [
+    ("{page}", 1, '\u{0015}'),
+    ("{total_pages}", 2, '\u{0016}'),
+    ("{file_name}", 3, '\u{0017}'),
+];
+
+/// 한 줄 텍스트만 받는다. rhwp 머리말/꼬리말·주석 텍스트 삽입은 줄바꿈을 문단 나눔으로
+/// 바꾸지 않고 문단 안 글자로 넣는다.
+fn check_single_line(name: &str, text: &str) -> Result<(), ErrorData> {
+    if text.contains(['\n', '\r']) {
+        return Err(ErrorData::invalid_params(
+            format!("{name} 은(는) 한 줄이어야 한다 (줄바꿈 불가)"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// "쪽 {page}/{total_pages}" 를 [글자, 필드, 글자, 필드] 조각으로 나눈다.
+enum HfPiece<'a> {
+    Text(&'a str),
+    Field(u8),
+}
+
+fn hf_pieces(text: &str) -> Vec<HfPiece<'_>> {
+    let mut pieces = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next = HF_FIELDS
+            .iter()
+            .filter_map(|&(token, code, _)| rest.find(token).map(|at| (at, token, code)))
+            .min_by_key(|&(at, _, _)| at);
+        match next {
+            Some((at, token, code)) => {
+                if at > 0 {
+                    pieces.push(HfPiece::Text(&rest[..at]));
+                }
+                pieces.push(HfPiece::Field(code));
+                rest = &rest[at + token.len()..];
+            }
+            None => {
+                pieces.push(HfPiece::Text(rest));
+                rest = "";
+            }
+        }
+    }
+    pieces
+}
+
+/// 머리말/꼬리말 문단을 set_header_footer 의 자리표시자 표기로 되돌린다.
+///
+/// 필드는 두 꼴로 존재한다. 편집 중에는 마커 한 글자(U+0015~U+0017)이고, 저장본을 다시
+/// 열면 rhwp 저장기가 바꾼 컨트롤이다 — 쪽 번호·전체 쪽수는 자리표 공백 한 글자에 놓인
+/// 자동 번호, 파일 이름은 그 범위 글자를 덮는 파일 경로 필드.
+fn hf_display_text(para: &rhwp::model::paragraph::Paragraph) -> String {
+    use rhwp::model::control::{AutoNumberType, FieldType};
+    let token_at = |idx: usize| -> Option<(&'static str, usize)> {
+        let positions = para.control_text_positions();
+        for (ci, ctrl) in para.controls.iter().enumerate() {
+            if positions.get(ci) != Some(&idx) {
+                continue;
+            }
+            match ctrl {
+                Control::AutoNumber(a) if a.number_type == AutoNumberType::Page => {
+                    return Some(("{page}", idx + 1))
+                }
+                Control::AutoNumber(a) if a.number_type == AutoNumberType::TotalPage => {
+                    return Some(("{total_pages}", idx + 1))
+                }
+                Control::Field(f) if f.field_type == FieldType::Path => {
+                    let end = para
+                        .field_ranges
+                        .iter()
+                        .find(|r| r.control_idx == ci)
+                        .map_or(idx, |r| r.end_char_idx);
+                    return Some(("{file_name}", end));
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let chars: Vec<char> = para.text.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i <= chars.len() {
+        if let Some((token, next)) = token_at(i) {
+            out.push_str(token);
+            if next > i {
+                i = next;
+                continue;
+            }
+        }
+        let Some(&ch) = chars.get(i) else { break };
+        match HF_FIELDS.iter().find(|&&(_, _, marker)| marker == ch) {
+            Some(&(token, _, _)) => out.push_str(token),
+            None => out.push(ch),
+        }
+        i += 1;
+    }
+    out
+}
+
 fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
@@ -455,6 +559,90 @@ pub struct InsertPictureParams {
     pub y_mm: Option<f64>,
     /// 그림 설명(대체 텍스트)
     pub description: Option<String>,
+}
+
+/// 주석 종류.
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteKind {
+    /// 각주 (쪽 아래)
+    Footnote,
+    /// 미주 (문서 끝)
+    Endnote,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertNoteParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스
+    pub para: usize,
+    /// 주석 번호를 넣을 위치 (char 단위)
+    pub char_offset: usize,
+    /// 주석 내용 (한 줄)
+    pub text: String,
+    /// 각주(footnote, 기본) 또는 미주(endnote)
+    pub kind: Option<NoteKind>,
+}
+
+/// 머리말/꼬리말 구분.
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderFooterKind {
+    Header,
+    Footer,
+}
+
+/// 머리말/꼬리말이 적용될 쪽.
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderFooterPages {
+    /// 양쪽 (기본)
+    #[default]
+    Both,
+    /// 짝수 쪽
+    Even,
+    /// 홀수 쪽
+    Odd,
+}
+
+impl HeaderFooterPages {
+    /// rhwp `header_footer_apply_from_u8` 의 숫자 (0=양쪽, 1=짝수, 2=홀수).
+    fn rhwp_code(self) -> u8 {
+        match self {
+            Self::Both => 0,
+            Self::Even => 1,
+            Self::Odd => 2,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct HeaderFooterParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// header 또는 footer
+    pub kind: HeaderFooterKind,
+    /// 적용 쪽: both(기본) / even / odd
+    pub pages: Option<HeaderFooterPages>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetHeaderFooterParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// header 또는 footer
+    pub kind: HeaderFooterKind,
+    /// 적용 쪽: both(기본) / even / odd
+    pub pages: Option<HeaderFooterPages>,
+    /// 내용 (한 줄). {page}=현재 쪽 번호, {total_pages}=전체 쪽 수, {file_name}=파일 이름
+    pub text: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1578,6 +1766,173 @@ impl HangulMcp {
                     .map_err(hwp_err)?;
             }
             Ok(out)
+        })
+    }
+
+    #[tool(
+        description = "본문 문단의 char_offset 위치에 각주(kind=footnote, 기본) 또는 미주(kind=endnote)를 넣고 내용 text를 채운다. 번호는 문서 순서대로 자동으로 매겨진다."
+    )]
+    pub fn insert_note(
+        &self,
+        Parameters(p): Parameters<InsertNoteParams>,
+    ) -> Result<String, ErrorData> {
+        check_single_line("text", &p.text)?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            check_body_offset(
+                &session.core,
+                p.section,
+                p.para,
+                "char_offset",
+                p.char_offset,
+            )?;
+            let out = match p.kind.unwrap_or(NoteKind::Footnote) {
+                NoteKind::Footnote => {
+                    session
+                        .core
+                        .insert_footnote_native(p.section, p.para, p.char_offset)
+                }
+                NoteKind::Endnote => {
+                    session
+                        .core
+                        .insert_endnote_native(p.section, p.para, p.char_offset)
+                }
+            }
+            .map_err(hwp_err)?;
+            if !p.text.is_empty() {
+                let v: Value = serde_json::from_str(&out).map_err(|e| {
+                    ErrorData::internal_error(format!("insert_note 결과 해석 실패: {e}"), None)
+                })?;
+                let ctrl = v["controlIdx"].as_u64().ok_or_else(|| {
+                    ErrorData::internal_error(
+                        format!("insert_note 결과에 controlIdx 없음: {out}"),
+                        None,
+                    )
+                })? as usize;
+                // 새 주석 문단은 번호 자리표시 공백 두 칸("  ")으로 시작한다. 내용은 그 뒤에 넣는다.
+                let note_para = &session.core.document().sections[p.section].paragraphs[p.para];
+                let start = match note_para.controls.get(ctrl) {
+                    Some(Control::Footnote(f)) => f.paragraphs.first(),
+                    Some(Control::Endnote(e)) => e.paragraphs.first(),
+                    _ => None,
+                }
+                .map(|np| np.text.chars().count())
+                .ok_or_else(|| {
+                    ErrorData::internal_error(
+                        format!("새 주석 컨트롤 {ctrl} 을 찾을 수 없음"),
+                        None,
+                    )
+                })?;
+                session
+                    .core
+                    .insert_text_in_footnote_native(p.section, p.para, ctrl, 0, start, &p.text)
+                    .map_err(hwp_err)?;
+            }
+            Ok(out)
+        })
+    }
+
+    #[tool(
+        description = "구역의 머리말(kind=header) 또는 꼬리말(kind=footer) 내용을 text 한 줄로 설정한다 (기존 것은 교체). text 안의 {page}, {total_pages}, {file_name}은 쪽 번호·전체 쪽 수·파일 이름 필드가 된다. pages=both(기본)/even/odd."
+    )]
+    pub fn set_header_footer(
+        &self,
+        Parameters(p): Parameters<SetHeaderFooterParams>,
+    ) -> Result<String, ErrorData> {
+        check_single_line("text", &p.text)?;
+        let is_header = p.kind == HeaderFooterKind::Header;
+        let apply = p.pages.unwrap_or_default().rhwp_code();
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let core = &mut session.core;
+            let existing: Value = serde_json::from_str(
+                &core
+                    .get_header_footer_native(p.section, is_header, apply)
+                    .map_err(hwp_err)?,
+            )
+            .map_err(|e| {
+                ErrorData::internal_error(format!("머리말/꼬리말 조회 해석 실패: {e}"), None)
+            })?;
+            if existing["exists"].as_bool() == Some(true) {
+                core.delete_header_footer_native(p.section, is_header, apply)
+                    .map_err(hwp_err)?;
+            }
+            core.create_header_footer_native(p.section, is_header, apply)
+                .map_err(hwp_err)?;
+            let mut offset = 0;
+            for piece in hf_pieces(&p.text) {
+                match piece {
+                    HfPiece::Text(t) => {
+                        core.insert_text_in_header_footer_native(
+                            p.section, is_header, apply, 0, offset, t,
+                        )
+                        .map_err(hwp_err)?;
+                        offset += t.chars().count();
+                    }
+                    HfPiece::Field(code) => {
+                        core.insert_field_in_hf_native(
+                            p.section, is_header, apply, 0, offset, code,
+                        )
+                        .map_err(hwp_err)?;
+                        offset += 1;
+                    }
+                }
+            }
+            core.get_header_footer_native(p.section, is_header, apply)
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "구역의 머리말/꼬리말 내용을 반환한다. 필드는 {page}, {total_pages}, {file_name}으로 표시된다. 없으면 exists=false."
+    )]
+    pub fn get_header_footer(
+        &self,
+        Parameters(p): Parameters<HeaderFooterParams>,
+    ) -> Result<String, ErrorData> {
+        let is_header = p.kind == HeaderFooterKind::Header;
+        let apply = p.pages.unwrap_or_default().rhwp_code();
+        self.store.with_session(&p.doc_id, |session| {
+            let mut v: Value = serde_json::from_str(
+                &session
+                    .core
+                    .get_header_footer_native(p.section, is_header, apply)
+                    .map_err(hwp_err)?,
+            )
+            .map_err(|e| {
+                ErrorData::internal_error(format!("머리말/꼬리말 조회 해석 실패: {e}"), None)
+            })?;
+            // rhwp 의 text 는 저장본을 다시 연 문서에서 필드를 자리표 공백으로만 보여 주므로,
+            // 컨트롤에서 직접 다시 그린다.
+            if let (Some(pi), Some(ci)) = (v["paraIndex"].as_u64(), v["controlIndex"].as_u64()) {
+                let host = &session.core.document().sections[p.section].paragraphs[pi as usize];
+                let paragraphs = match host.controls.get(ci as usize) {
+                    Some(Control::Header(h)) => &h.paragraphs,
+                    Some(Control::Footer(f)) => &f.paragraphs,
+                    _ => {
+                        return Err(ErrorData::internal_error(
+                            format!("머리말/꼬리말 컨트롤 ({pi},{ci}) 을 찾을 수 없음"),
+                            None,
+                        ))
+                    }
+                };
+                let text: Vec<String> = paragraphs.iter().map(hf_display_text).collect();
+                v["text"] = json!(text.join("\n"));
+            }
+            Ok(v.to_string())
+        })
+    }
+
+    #[tool(description = "구역의 머리말/꼬리말을 삭제한다.")]
+    pub fn delete_header_footer(
+        &self,
+        Parameters(p): Parameters<HeaderFooterParams>,
+    ) -> Result<String, ErrorData> {
+        let is_header = p.kind == HeaderFooterKind::Header;
+        let apply = p.pages.unwrap_or_default().rhwp_code();
+        self.store.with_session_edit(&p.doc_id, |session| {
+            session
+                .core
+                .delete_header_footer_native(p.section, is_header, apply)
+                .map_err(hwp_err)
         })
     }
 

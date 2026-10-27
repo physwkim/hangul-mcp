@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (41)
+## Tools (45)
 
 **Session**
 
@@ -125,6 +125,15 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | Tool | Description |
 |------|-------------|
 | `insert_picture(doc_id, section, para, char_offset, image_path, width_mm?, height_mm?, inline?, x_mm?, y_mm?, description?)` | Insert a PNG/JPEG/GIF/BMP/TIFF picture into a body paragraph. One size given keeps the aspect ratio; none uses the 96 DPI natural size. `inline=true` (default) treats it as a character; `inline=false` floats it at `x_mm`/`y_mm` from the paper corner (default: body top-left) |
+
+**Notes, header and footer**
+
+| Tool | Description |
+|------|-------------|
+| `insert_note(doc_id, section, para, char_offset, text, kind?)` | Insert a footnote (`kind="footnote"`, default) or endnote (`"endnote"`) with one line of text; numbering follows document order |
+| `set_header_footer(doc_id, section, kind, pages?, text)` | Set (replace) the header (`kind="header"`) or footer (`"footer"`) for `pages` = `both` (default) / `even` / `odd`. `{page}`, `{total_pages}`, `{file_name}` in `text` become fields |
+| `get_header_footer(doc_id, section, kind, pages?)` | Read a header/footer; fields are shown as `{page}` / `{total_pages}` / `{file_name}` |
+| `delete_header_footer(doc_id, section, kind, pages?)` | Delete a header/footer |
 
 **Fields (누름틀)** — filling in form documents
 
