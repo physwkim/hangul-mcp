@@ -4351,6 +4351,7 @@ fn insert_hyperlink(
             start,
             end,
             url: url.to_string(),
+            link_style: None,
         }))
         .map(|out| {
             serde_json::from_str::<Value>(&out).unwrap()["field_id"]
@@ -4478,6 +4479,48 @@ fn hyperlink_body_and_cell_roundtrip() {
             want,
             "{ext}"
         );
+    }
+}
+
+/// 링크 글자는 기본으로 파란색·밑줄이 되어 HWPX/HWP 저장본에 남고, link_style=false 면 그대로다.
+#[test]
+fn hyperlink_link_style_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_at0(&server, &doc_id, "LINK mid TAIL ");
+    insert_hyperlink(&server, &doc_id, (0, None), (0, 4), "https://example.com/").unwrap();
+    server
+        .insert_hyperlink(Parameters(InsertHyperlinkParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            start: 9,
+            end: 13,
+            url: "https://example.org/".to_string(),
+            link_style: Some(false),
+        }))
+        .unwrap();
+    const BLUE_BGR: u32 = 0xFF0000;
+    for (ext, doc) in save_both(&server, &doc_id, "link_style") {
+        let para = &doc.sections[0].paragraphs[0];
+        let styled = |i| {
+            let cs = char_shape_at(&doc, para, i);
+            (
+                cs.text_color == BLUE_BGR,
+                cs.underline_type != rhwp::model::style::UnderlineType::None,
+            )
+        };
+        for i in 0..4 {
+            assert_eq!(styled(i), (true, true), "{ext} 링크 글자 [{i}]");
+        }
+        for i in 4..13 {
+            assert_eq!(
+                styled(i),
+                (false, false),
+                "{ext} 링크 밖·link_style=false [{i}]"
+            );
+        }
     }
 }
 

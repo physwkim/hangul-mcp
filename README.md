@@ -194,7 +194,7 @@ an equation inside a textbox is rejected — rhwp's natives for those take table
 | `add_bookmark(doc_id, section, para, char_offset, name)` | Add a bookmark in a body paragraph. Names are unique in the document |
 | `rename_bookmark(doc_id, name, new_name)` / `delete_bookmark(doc_id, name)` | Rename / delete a body bookmark by name |
 | `list_hyperlinks(doc_id)` | Every hyperlink in body and table-cell paragraphs (`field_id`, `start`/`end` char range, `text`, `url`) |
-| `insert_hyperlink(doc_id, section, para, cell?, start, end, url)` | Link the text `start..end` (end exclusive) to an `http(s)://` URL. Text and character format are kept (style it with `apply_char_format`); ranges overlapping another field are rejected |
+| `insert_hyperlink(doc_id, section, para, cell?, start, end, url, link_style?)` | Link the text `start..end` (end exclusive) to an `http(s)://` URL. The linked text turns blue (`#0000FF`) and underlined; `link_style=false` keeps its character format. Ranges overlapping another field are rejected |
 | `update_hyperlink(doc_id, section, para, cell?, field_id, url?, text?)` | Change the URL and/or the displayed text |
 | `remove_hyperlink(doc_id, section, para, cell?, field_id)` | Unlink; the text stays |
 

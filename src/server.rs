@@ -90,6 +90,35 @@ fn check_offset(
     Ok(())
 }
 
+/// insert_hyperlink 가 링크 글자에 거는 색.
+const LINK_COLOR: &str = "#0000FF";
+
+/// 본문 문단, 또는 `cell` 이면 그 셀·글상자 문단의 [start, end) 에 rhwp 글자 속성 JSON 을 건다.
+/// 범위 검사는 호출한 쪽이 한다.
+fn apply_char_props(
+    core: &mut DocumentCore,
+    section: usize,
+    para: usize,
+    cell: Option<&CellTarget>,
+    (start, end): (usize, usize),
+    props: &str,
+) -> Result<String, ErrorData> {
+    match cell {
+        Some(c) => core.apply_char_format_in_cell_native(
+            section,
+            para,
+            c.control,
+            c.cell,
+            c.cell_para(),
+            start,
+            end,
+            props,
+        ),
+        None => core.apply_char_format_native(section, para, start, end, props),
+    }
+    .map_err(hwp_err)
+}
+
 /// 여러 줄 텍스트를 줄(문단)로 나눈다. 줄바꿈 외의 제어 문자는 rhwp 가 문단 텍스트에 그대로
 /// 넣어 저장본이 깨지므로 받지 않는다.
 fn text_lines<'a>(name: &str, text: &'a str) -> Result<Vec<&'a str>, ErrorData> {
@@ -791,6 +820,8 @@ pub struct InsertHyperlinkParams {
     pub end: usize,
     /// http:// 또는 https:// 절대 주소
     pub url: String,
+    /// 링크 글자를 파란색(#0000FF)·밑줄로 바꾼다 (생략 시 true). false 면 서식을 그대로 둔다
+    pub link_style: Option<bool>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -2015,7 +2046,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(표 셀·글상자 안이면 cell)의 글자 범위 start..end(end 제외, char 단위)에 웹 링크(http/https)를 건다. 글자와 서식은 그대로 둔다(파란 밑줄 등은 apply_char_format). 다른 필드와 겹치면 거부한다. 결과의 field_id 로 고치거나 지운다."
+        description = "문단(표 셀·글상자 안이면 cell)의 글자 범위 start..end(end 제외, char 단위)에 웹 링크(http/https)를 건다. 링크 글자는 파란색·밑줄이 되고, link_style=false 면 서식을 그대로 둔다. 다른 필드와 겹치면 거부한다. 결과의 field_id 로 고치거나 지운다."
     )]
     pub fn insert_hyperlink(
         &self,
@@ -2035,6 +2066,21 @@ impl HangulMcp {
                 .core
                 .insert_hyperlink_native(&target, p.start, p.end, &p.url)
                 .map_err(hwp_err)?;
+            if p.link_style.unwrap_or(true) {
+                let link = CharFormat {
+                    text_color: Some(LINK_COLOR.to_string()),
+                    underline: Some(true),
+                    ..CharFormat::default()
+                };
+                apply_char_props(
+                    &mut session.core,
+                    p.section,
+                    p.para,
+                    p.cell.as_ref(),
+                    (p.start, p.end),
+                    &link.to_rhwp_props(None)?,
+                )?;
+            }
             Ok(json!({"field_id": field_id}).to_string())
         })
     }
@@ -2694,7 +2740,6 @@ impl HangulMcp {
         p.format.validate()?;
         self.store.with_session_edit(&p.doc_id, |session| {
             let len = para_len(&session.core, p.section, p.para, p.cell.as_ref())?;
-            let cell = p.cell.as_ref().map(|c| (c.control, c.cell, c.cell_para()));
             // rhwp 는 범위 밖이나 빈 범위를 오류 없이 무시하므로 여기서 거른다.
             if p.start >= p.end || p.end > len {
                 return Err(ErrorData::invalid_params(
@@ -2709,16 +2754,14 @@ impl HangulMcp {
                 Some(name) => Some(crate::format::font_ids_for(&mut session.core, name)?),
                 None => None,
             };
-            let props = p.format.to_rhwp_props(font_ids)?;
-            match cell {
-                Some((control, cell, cp)) => session.core.apply_char_format_in_cell_native(
-                    p.section, p.para, control, cell, cp, p.start, p.end, &props,
-                ),
-                None => session
-                    .core
-                    .apply_char_format_native(p.section, p.para, p.start, p.end, &props),
-            }
-            .map_err(hwp_err)
+            apply_char_props(
+                &mut session.core,
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                (p.start, p.end),
+                &p.format.to_rhwp_props(font_ids)?,
+            )
         })
     }
 
