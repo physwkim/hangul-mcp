@@ -5159,6 +5159,68 @@ fn textbox_text_roundtrip() {
     }
 }
 
+fn save_warnings(server: &HangulMcp, doc_id: &str, name: &str) -> Value {
+    let out: Value = serde_json::from_str(
+        &server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.to_string(),
+                output_path: Some(temp_out(name)),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out["warnings"].clone()
+}
+
+/// .hwp 저장은 tight/through 를 square 로 바꾸므로 그 개체 수를 warnings 로 알리고,
+/// HWPX 저장과 tight/through 가 없는 .hwp 저장은 경고가 없다.
+#[test]
+fn hwp_save_warns_about_tight_and_through_wrap() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    assert_eq!(
+        save_warnings(&server, &doc_id, "wrap_none.hwp"),
+        Value::Null
+    );
+    let pic = insert_sample_picture(&server, &doc_id, "wrap_pic.png");
+    apply_picture_format(
+        &server,
+        &doc_id,
+        pic,
+        PictureFormat {
+            placement: Placement {
+                inline: Some(false),
+                text_wrap: Some(PlacementWrap::Tight),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let shape = insert_shape(
+        &server,
+        shape_params(&doc_id, ShapeKind::Rectangle, (20.0, 10.0)),
+    )
+    .unwrap();
+    let through = |wrap| ShapeFormat {
+        placement: Placement {
+            text_wrap: Some(wrap),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    apply_shape_format(&server, &doc_id, shape, through(PlacementWrap::Through)).unwrap();
+    assert_eq!(
+        save_warnings(&server, &doc_id, "wrap_lossy.hwpx"),
+        Value::Null
+    );
+    let w = save_warnings(&server, &doc_id, "wrap_lossy.hwp");
+    assert!(w[0].as_str().unwrap().contains("2개"), "{w}");
+    apply_shape_format(&server, &doc_id, shape, through(PlacementWrap::Square)).unwrap();
+    let w = save_warnings(&server, &doc_id, "wrap_lossy_one.hwp");
+    assert!(w[0].as_str().unwrap().contains("1개"), "{w}");
+}
+
 /// 삽입 뒤에도 글상자 문단을 `cell {control, cell: 0}` 으로 편집하고, 목록·구조 도구가 그 위치를 알린다.
 #[test]
 fn textbox_edit_after_insert_roundtrip() {

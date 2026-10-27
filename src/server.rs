@@ -304,6 +304,30 @@ fn history_json(h: crate::store::HistoryStatus) -> String {
     .to_string()
 }
 
+/// `.hwp` 저장이 square 로 바꾸는 tight/through 배치 개체 수 — HWP 5.0 배치 필드(rhwp
+/// `text_wrap_to_bits`)에는 두 값이 없다. 표 셀·글상자·머리말·각주·캡션·바탕쪽 등 어느 깊이의
+/// 개체도 빠지지 않도록 문단 트리를 직접 걷지 않고 rhwp 모델의 Serialize 결과에서
+/// `text_wrap` 을 센다(모든 개체 공통 속성 `CommonObjAttr` 이 이 이름으로 직렬화된다).
+fn hwp_lossy_wraps(doc: &Document) -> Result<usize, serde_json::Error> {
+    fn count(v: &Value) -> usize {
+        match v {
+            Value::Object(m) => m
+                .iter()
+                .map(|(k, v)| match (k.as_str(), v.as_str()) {
+                    ("text_wrap", Some("Tight" | "Through")) => 1,
+                    _ => count(v),
+                })
+                .sum(),
+            Value::Array(a) => a.iter().map(count).sum(),
+            _ => 0,
+        }
+    }
+    doc.sections.iter().try_fold(0, |n, sec| {
+        let tree = serde_json::to_value((&sec.section_def, &sec.paragraphs, &sec.trailing_lists))?;
+        Ok(n + count(&tree))
+    })
+}
+
 fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
@@ -1607,7 +1631,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문서를 저장한다. 경로 확장자가 .hwpx면 HWPX, .hwp면 HWP 5.0 바이너리로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다."
+        description = "문서를 저장한다. 경로 확장자가 .hwpx면 HWPX, .hwp면 HWP 5.0 바이너리로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다. .hwp 로 표현할 수 없어 바뀐 것(tight/through 배치 → square)은 결과 warnings 로 알린다."
     )]
     pub fn save_document(
         &self,
@@ -1639,11 +1663,23 @@ impl HangulMcp {
             .map_err(hwp_err)?;
             std::fs::write(&target, &bytes)
                 .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
-            Ok(json!({
+            let mut out = json!({
                 "saved_path": target.display().to_string(),
                 "bytes": bytes.len(),
-            })
-            .to_string())
+            });
+            if ext.as_deref() == Some("hwp") {
+                let warning = match hwp_lossy_wraps(session.core.document()) {
+                    Ok(0) => None,
+                    Ok(n) => Some(format!(
+                        "tight/through 배치 개체 {n}개가 .hwp 에는 square 로 저장됐다 (HWPX 로 저장하면 유지된다)"
+                    )),
+                    Err(e) => Some(format!("tight/through 배치 검사 실패: {e}")),
+                };
+                if let Some(w) = warning {
+                    out["warnings"] = json!([w]);
+                }
+            }
+            Ok(out.to_string())
         })
     }
 
