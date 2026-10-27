@@ -18,17 +18,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
+use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
 const PREVIEW_CHARS: usize = 80;
-/// 그림 크기·위치(mm)의 상한. HWP 용지 최대 크기보다 넉넉하게 잡는다.
-const MAX_PAPER_MM: f64 = 2000.0;
-
-fn mm_to_hu(mm: f64) -> f64 {
-    mm * 7200.0 / 25.4
-}
-
 #[derive(Clone)]
 pub struct HangulMcp {
     store: Arc<DocumentStore>,
@@ -766,6 +760,24 @@ pub struct FormAtParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct SectionParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetPageSetupParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+    /// 바꿀 쪽 설정 (지정한 항목만 바뀐다. get_page_setup 결과와 같은 모양)
+    pub setup: PageSetup,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ObjectAtParams {
     /// 문서 핸들
     pub doc_id: String,
@@ -949,6 +961,54 @@ impl HangulMcp {
                 "bytes": bytes.len(),
             })
             .to_string())
+        })
+    }
+
+    #[tool(
+        description = "구역의 쪽 설정(용지 크기·방향, 여백, 제본)을 mm 단위로 반환한다. 결과는 set_page_setup의 setup 입력과 같은 모양."
+    )]
+    pub fn get_page_setup(
+        &self,
+        Parameters(p): Parameters<SectionParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let section = session
+                .core
+                .document()
+                .sections
+                .get(p.section)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(format!("구역 {} 이 없다", p.section), None)
+                })?;
+            Ok(json!(PageSetup::from_page_def(&section.section_def.page_def)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "구역의 쪽 설정을 바꾼다: paper_width_mm/paper_height_mm(세로 기준, A4=210×297), orientation(portrait/landscape), margin_*_mm(left/right/top/bottom/header/footer/gutter), binding(single/duplex/top_flip). 지정한 항목만 바뀌고, 여백이 용지를 넘으면 오류."
+    )]
+    pub fn set_page_setup(
+        &self,
+        Parameters(p): Parameters<SetPageSetupParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let section = session
+                .core
+                .document()
+                .sections
+                .get(p.section)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(format!("구역 {} 이 없다", p.section), None)
+                })?;
+            let props = p.setup.to_rhwp_json(&section.section_def.page_def)?;
+            session
+                .core
+                .set_page_def_native(p.section, &props)
+                .map_err(hwp_err)?;
+            let pd = &session.core.document().sections[p.section]
+                .section_def
+                .page_def;
+            Ok(json!(PageSetup::from_page_def(pd)).to_string())
         })
     }
 

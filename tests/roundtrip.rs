@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
+use hangul_mcp::page::{Binding, Orientation, PageSetup};
 use hangul_mcp::server::{
     ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, BreakKind, CreateTableParams,
     DeleteTextParams, DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
@@ -15,8 +16,9 @@ use hangul_mcp::server::{
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
     MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
     ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
-    SetCellTextParams, SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams,
-    SplitParagraphParams, SplitTableCellParams, StyleRef,
+    SectionParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
+    SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams, SplitTableCellParams,
+    StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -3111,4 +3113,137 @@ fn delete_object_rejects_non_objects() {
         );
     }
     assert!(delete_object(&server, &doc_id, 99, 0).is_err());
+}
+
+fn page_setup(server: &HangulMcp, doc_id: &str) -> PageSetup {
+    serde_json::from_str(
+        &server
+            .get_page_setup(Parameters(SectionParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn set_page(server: &HangulMcp, doc_id: &str, setup: PageSetup) -> Result<String, rmcp::ErrorData> {
+    server.set_page_setup(Parameters(SetPageSetupParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        setup,
+    }))
+}
+
+/// SVG 루트의 width/height 속성 (px).
+fn svg_size(path: &str) -> (f64, f64) {
+    let svg = std::fs::read_to_string(path).unwrap();
+    let root = &svg[svg.find("<svg").unwrap()..];
+    let root = &root[..root.find('>').unwrap()];
+    let attr = |name: &str| -> f64 {
+        let key = format!(" {name}=\"");
+        let start = root.find(&key).unwrap() + key.len();
+        let end = start + root[start..].find('"').unwrap();
+        root[start..end].trim_end_matches("px").parse().unwrap()
+    };
+    (attr("width"), attr("height"))
+}
+
+/// 가로 방향·여백 변경이 저장 뒤에도 남고, 지정하지 않은 항목은 그대로이며,
+/// 미저장 상태 렌더링도 가로 쪽으로 그린다.
+#[test]
+fn page_setup_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let before = page_setup(&server, &doc_id);
+    assert_eq!(
+        before.orientation,
+        Some(Orientation::Portrait),
+        "{before:?}"
+    );
+
+    let after = PageSetup {
+        orientation: Some(Orientation::Landscape),
+        margin_left_mm: Some(20.0),
+        margin_top_mm: Some(12.5),
+        binding: Some(Binding::Duplex),
+        ..before.clone()
+    };
+    let out: PageSetup = serde_json::from_str(
+        &set_page(
+            &server,
+            &doc_id,
+            PageSetup {
+                orientation: after.orientation,
+                margin_left_mm: after.margin_left_mm,
+                margin_top_mm: after.margin_top_mm,
+                binding: after.binding,
+                ..Default::default()
+            },
+        )
+        .expect("set_page_setup"),
+    )
+    .unwrap();
+    assert_eq!(out, after);
+    assert_eq!(page_setup(&server, &doc_id), after);
+
+    let svg = temp_out("page_setup.svg");
+    render(&server, &doc_id, 0, &svg).expect("render");
+    let (w, h) = svg_size(&svg);
+    assert!(w > h, "가로 방향인데 SVG 가 {w}×{h}");
+
+    for (ext, doc) in save_both(&server, &doc_id, "page_setup") {
+        let reopened = PageSetup::from_page_def(&doc.sections[0].section_def.page_def);
+        assert_eq!(reopened, after, "{ext}");
+    }
+}
+
+/// 본문 영역이 사라지는 여백, 빈 설정, 범위 밖 값, 없는 구역은 오류이고 아무것도 바꾸지 않는다.
+#[test]
+fn set_page_setup_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let before = page_setup(&server, &doc_id);
+    let bad = [
+        PageSetup {
+            margin_left_mm: Some(150.0),
+            margin_right_mm: Some(100.0),
+            ..Default::default()
+        },
+        PageSetup {
+            margin_header_mm: Some(150.0),
+            margin_footer_mm: Some(150.0),
+            ..Default::default()
+        },
+        PageSetup::default(),
+        PageSetup {
+            paper_width_mm: Some(5.0),
+            ..Default::default()
+        },
+        PageSetup {
+            margin_gutter_mm: Some(-1.0),
+            ..Default::default()
+        },
+    ];
+    for setup in bad {
+        assert!(
+            set_page(&server, &doc_id, setup.clone()).is_err(),
+            "{setup:?} 가 적용됨"
+        );
+    }
+    assert!(server
+        .set_page_setup(Parameters(SetPageSetupParams {
+            doc_id: doc_id.clone(),
+            section: 9,
+            setup: PageSetup {
+                margin_left_mm: Some(10.0),
+                ..Default::default()
+            },
+        }))
+        .is_err());
+    assert_eq!(page_setup(&server, &doc_id), before);
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 설정이 되돌리기 기록을 남김"
+    );
 }

@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (49)
+## Tools (51)
 
 **Session**
 
@@ -113,6 +113,13 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 | `list_styles(doc_id)` | Styles defined in the document → `{styles: [{id, name, english_name, kind}]}` (`kind`: `para` or `char`) |
 | `apply_style(doc_id, section, para, cell?, style)` | Apply a style by `id` (number) or name (string, e.g. `"개요 1"`). A paragraph that already has direct paragraph formatting keeps its paragraph shape |
 | `apply_char_format(doc_id, section, para, start, end, cell?, format)` | Apply character formatting to the `[start, end)` range of a body paragraph, or of a table cell paragraph when `cell = {control, cell, cell_para?}` is given. `format` fields are all optional and only the given ones change: `bold`, `italic`, `underline`, `underline_type`, `underline_shape`, `underline_color`, `strikethrough`, `strike_shape`, `strike_color`, `font_size_pt`, `font_name`, `text_color`, `shade_color`, `outline_type`, `shadow_type`, `shadow_color`, `shadow_offset_x/y`, `superscript`, `subscript`, `emboss`, `engrave`, `emphasis_dot`, `kerning`, `ratio_percent`, `spacing_percent`, `relative_size_percent`, `char_offset_percent`. Colors are `"#RRGGBB"` |
+
+**Page setup**
+
+| Tool | Description |
+|------|-------------|
+| `get_page_setup(doc_id, section)` | Paper size, orientation, margins and binding of a section in mm — the same shape as the `setup` input of `set_page_setup` |
+| `set_page_setup(doc_id, section, setup)` | Change `paper_width_mm`/`paper_height_mm` (portrait dimensions, A4 = 210×297), `orientation` (`portrait`/`landscape`), `margin_{left,right,top,bottom,header,footer,gutter}_mm`, `binding` (`single`/`duplex`/`top_flip`). Only the given fields change; margins that leave no body area are rejected |
 
 **Table editing**
 
