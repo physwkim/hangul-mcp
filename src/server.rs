@@ -2297,14 +2297,21 @@ impl HangulMcp {
         .to_string())
     }
 
-    #[tool(description = "열려 있는 문서 핸들 목록과 미저장 변경 여부를 반환한다.")]
+    #[tool(
+        description = "열려 있는 문서 핸들 목록과 미저장 변경 여부를 반환한다. fault 는 편집 되돌리기나 undo/redo 가 실패해 문서 상태를 알 수 없게 되어 세션이 막힌 이유다 — 막힌 세션은 close_document 로 닫고 다시 열어야 한다."
+    )]
     pub fn list_documents(&self) -> Result<String, ErrorData> {
         let docs: Vec<_> = self
             .store
             .list()
             .into_iter()
-            .map(|(id, path, dirty)| {
-                json!({"doc_id": id, "path": path.display().to_string(), "dirty": dirty})
+            .map(|(id, path, dirty, fault)| {
+                json!({
+                    "doc_id": id,
+                    "path": path.display().to_string(),
+                    "dirty": dirty,
+                    "fault": fault,
+                })
             })
             .collect();
         Ok(json!(docs).to_string())

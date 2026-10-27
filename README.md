@@ -68,7 +68,7 @@ place in every tool.
 | `undo(doc_id)` | Revert the last successful editing tool call as one unit (up to 20 steps). Returning to the saved state clears `dirty` |
 | `redo(doc_id)` | Re-apply an undone edit; a new edit after `undo` drops the redo history |
 | `close_document(doc_id)` | Close the session. Unsaved changes are discarded, and the result says so |
-| `list_documents()` | Open documents and their dirty state |
+| `list_documents()` | Open documents, their dirty state, and `fault` — the reason a session was blocked after its state could not be re-established (a failed rollback or undo/redo). A blocked session refuses every tool but `close_document`; reopen the file |
 | `server_info()` | Build info: this crate's version, plus the rhwp version and source (git rev) it was built against |
 
 **Reading**
