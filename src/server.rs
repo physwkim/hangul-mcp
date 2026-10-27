@@ -17,6 +17,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::format::{paragraph_at, CellTarget, CharFormat, ParaFormat};
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
@@ -338,88 +339,6 @@ pub struct SetFormValueParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-pub struct CellTarget {
-    /// 표가 속한 문단의 컨트롤 인덱스 (get_structure의 table control 값)
-    pub control: usize,
-    /// 셀 평면 인덱스 (get_table의 cell_idx)
-    pub cell: usize,
-    /// 셀 내 문단 인덱스 (생략 시 0)
-    pub cell_para: Option<usize>,
-}
-
-#[derive(Clone, Copy, Deserialize, schemars::JsonSchema)]
-pub enum UnderlineType {
-    /// 밑줄 없음
-    None,
-    /// 글자 아래 밑줄
-    Bottom,
-    /// 글자 위 윗줄
-    Top,
-}
-
-/// 적용할 글자 서식. 지정한 항목만 바뀌고 나머지는 원래 서식을 유지한다.
-/// 색상은 모두 "#RRGGBB" 형식이다.
-#[derive(Deserialize, schemars::JsonSchema)]
-pub struct CharFormat {
-    /// 진하게
-    pub bold: Option<bool>,
-    /// 기울임
-    pub italic: Option<bool>,
-    /// 밑줄 (underline_type이 있으면 그쪽이 우선)
-    pub underline: Option<bool>,
-    /// 밑줄 위치
-    pub underline_type: Option<UnderlineType>,
-    /// 밑줄 모양 (0~10, HWP 선 종류: 0=실선, 1=긴 점선, 2=점선 …)
-    pub underline_shape: Option<u8>,
-    /// 밑줄 색
-    pub underline_color: Option<String>,
-    /// 취소선
-    pub strikethrough: Option<bool>,
-    /// 취소선 모양 (0~10, HWP 선 종류)
-    pub strike_shape: Option<u8>,
-    /// 취소선 색
-    pub strike_color: Option<String>,
-    /// 글자 크기 (pt, 예: 10.5)
-    pub font_size_pt: Option<f64>,
-    /// 글꼴 이름 (예: "맑은 고딕"). 문서에 없으면 새로 등록한다. 모든 언어 글꼴에 적용된다.
-    pub font_name: Option<String>,
-    /// 글자 색
-    pub text_color: Option<String>,
-    /// 음영(형광펜) 색
-    pub shade_color: Option<String>,
-    /// 외곽선 종류 (0=없음, 1~6 HWP 외곽선 종류)
-    pub outline_type: Option<u8>,
-    /// 그림자 종류 (0=없음, 1=비연속, 2=연속)
-    pub shadow_type: Option<u8>,
-    /// 그림자 색
-    pub shadow_color: Option<String>,
-    /// 그림자 X 간격 (-100~100%)
-    pub shadow_offset_x: Option<i8>,
-    /// 그림자 Y 간격 (-100~100%)
-    pub shadow_offset_y: Option<i8>,
-    /// 위첨자 (subscript와 동시에 true일 수 없음)
-    pub superscript: Option<bool>,
-    /// 아래첨자 (superscript와 동시에 true일 수 없음)
-    pub subscript: Option<bool>,
-    /// 양각
-    pub emboss: Option<bool>,
-    /// 음각
-    pub engrave: Option<bool>,
-    /// 강조점 종류 (0=없음, 1~6)
-    pub emphasis_dot: Option<u8>,
-    /// 커닝
-    pub kerning: Option<bool>,
-    /// 장평 (50~200%, 모든 언어에 적용)
-    pub ratio_percent: Option<u8>,
-    /// 자간 (-50~50%, 모든 언어에 적용)
-    pub spacing_percent: Option<i8>,
-    /// 상대 크기 (10~250%, 모든 언어에 적용)
-    pub relative_size_percent: Option<u8>,
-    /// 글자 위치 (-100~100%, 모든 언어에 적용)
-    pub char_offset_percent: Option<i8>,
-}
-
-#[derive(Deserialize, schemars::JsonSchema)]
 pub struct ApplyCharFormatParams {
     /// 문서 핸들
     pub doc_id: String,
@@ -437,163 +356,46 @@ pub struct ApplyCharFormatParams {
     pub format: CharFormat,
 }
 
-/// "#RRGGBB" 만 받는다. rhwp 는 형식이 틀린 색을 오류 없이 버리므로 여기서 거른다.
-fn check_color(key: &str, value: &str) -> Result<(), ErrorData> {
-    let ok = value.len() == 7
-        && value.starts_with('#')
-        && value[1..].chars().all(|c| c.is_ascii_hexdigit());
-    if ok {
-        Ok(())
-    } else {
-        Err(ErrorData::invalid_params(
-            format!("{key} 는 \"#RRGGBB\" 형식이어야 한다: {value:?}"),
-            None,
-        ))
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetCharFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
+    pub para: usize,
+    /// 조회 시작 위치 (char 단위, 포함, 생략 시 0)
+    pub start: Option<usize>,
+    /// 조회 끝 위치 (char 단위, 제외, 생략 시 문단 끝)
+    pub end: Option<usize>,
+    /// 지정하면 본문 대신 표 셀 문단을 조회한다
+    pub cell: Option<CellTarget>,
 }
 
-fn check_range<T: PartialOrd + std::fmt::Display>(
-    key: &str,
-    value: T,
-    min: T,
-    max: T,
-) -> Result<(), ErrorData> {
-    if value < min || value > max {
-        return Err(ErrorData::invalid_params(
-            format!("{key} 는 {min}~{max} 범위여야 한다: {value}"),
-            None,
-        ));
-    }
-    Ok(())
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ParaTargetParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
+    pub para: usize,
+    /// 지정하면 본문 대신 표 셀 문단을 대상으로 한다
+    pub cell: Option<CellTarget>,
 }
 
-impl CharFormat {
-    /// rhwp 의 속성 파서는 범위를 벗어난 값을 잘라서(`as u8`) 넣고 모르는 형식은
-    /// 조용히 무시하므로, 문서를 건드리기 전에 값 검증을 여기서 끝낸다.
-    fn validate(&self) -> Result<(), ErrorData> {
-        for (key, color) in [
-            ("text_color", &self.text_color),
-            ("shade_color", &self.shade_color),
-            ("underline_color", &self.underline_color),
-            ("strike_color", &self.strike_color),
-            ("shadow_color", &self.shadow_color),
-        ] {
-            if let Some(c) = color {
-                check_color(key, c)?;
-            }
-        }
-        if let Some(pt) = self.font_size_pt {
-            check_range("font_size_pt", pt, 1.0, 4096.0)?;
-        }
-        if let Some(name) = &self.font_name {
-            if name.trim().is_empty() {
-                return Err(ErrorData::invalid_params("font_name 이 비어 있다", None));
-            }
-        }
-        if let Some(v) = self.underline_shape {
-            check_range("underline_shape", v, 0, 10)?;
-        }
-        if let Some(v) = self.strike_shape {
-            check_range("strike_shape", v, 0, 10)?;
-        }
-        if let Some(v) = self.outline_type {
-            check_range("outline_type", v, 0, 6)?;
-        }
-        if let Some(v) = self.shadow_type {
-            check_range("shadow_type", v, 0, 2)?;
-        }
-        if let Some(v) = self.shadow_offset_x {
-            check_range("shadow_offset_x", v, -100, 100)?;
-        }
-        if let Some(v) = self.shadow_offset_y {
-            check_range("shadow_offset_y", v, -100, 100)?;
-        }
-        if let Some(v) = self.emphasis_dot {
-            check_range("emphasis_dot", v, 0, 6)?;
-        }
-        if let Some(v) = self.ratio_percent {
-            check_range("ratio_percent", v, 50, 200)?;
-        }
-        if let Some(v) = self.spacing_percent {
-            check_range("spacing_percent", v, -50, 50)?;
-        }
-        if let Some(v) = self.relative_size_percent {
-            check_range("relative_size_percent", v, 10, 250)?;
-        }
-        if let Some(v) = self.char_offset_percent {
-            check_range("char_offset_percent", v, -100, 100)?;
-        }
-        if self.superscript == Some(true) && self.subscript == Some(true) {
-            return Err(ErrorData::invalid_params(
-                "superscript 와 subscript 는 동시에 true일 수 없다",
-                None,
-            ));
-        }
-        Ok(())
-    }
-
-    /// rhwp `apply_char_format*_native` 가 받는 속성 JSON 으로 바꾼다.
-    /// `font_id` 는 `font_name` 을 문서에 등록해 얻은 ID 다.
-    fn to_rhwp_props(&self, font_id: Option<u16>) -> Result<String, ErrorData> {
-        let mut m = serde_json::Map::new();
-        let mut put = |key: &str, v: serde_json::Value| {
-            m.insert(key.to_string(), v);
-        };
-        macro_rules! opt {
-            ($key:literal, $field:expr) => {
-                if let Some(v) = &$field {
-                    put($key, json!(v));
-                }
-            };
-        }
-        opt!("bold", self.bold);
-        opt!("italic", self.italic);
-        opt!("underline", self.underline);
-        if let Some(t) = self.underline_type {
-            let s = match t {
-                UnderlineType::None => "None",
-                UnderlineType::Bottom => "Bottom",
-                UnderlineType::Top => "Top",
-            };
-            put("underlineType", json!(s));
-        }
-        opt!("underlineShape", self.underline_shape);
-        opt!("underlineColor", self.underline_color);
-        opt!("strikethrough", self.strikethrough);
-        opt!("strikeShape", self.strike_shape);
-        opt!("strikeColor", self.strike_color);
-        if let Some(pt) = self.font_size_pt {
-            // HWP 글자 크기 단위는 1/100 pt.
-            put("fontSize", json!((pt * 100.0).round() as i32));
-        }
-        opt!("fontId", font_id);
-        opt!("textColor", self.text_color);
-        opt!("shadeColor", self.shade_color);
-        opt!("outlineType", self.outline_type);
-        opt!("shadowType", self.shadow_type);
-        opt!("shadowColor", self.shadow_color);
-        opt!("shadowOffsetX", self.shadow_offset_x);
-        opt!("shadowOffsetY", self.shadow_offset_y);
-        opt!("superscript", self.superscript);
-        opt!("subscript", self.subscript);
-        opt!("emboss", self.emboss);
-        opt!("engrave", self.engrave);
-        opt!("emphasisDot", self.emphasis_dot);
-        opt!("kerning", self.kerning);
-        // 언어별 7칸 배열 (한글/영문/한자/일어/기타/기호/사용자) 에 같은 값을 넣는다.
-        opt!("ratios", self.ratio_percent.map(|v| [v; 7]));
-        opt!("spacings", self.spacing_percent.map(|v| [v; 7]));
-        opt!("relativeSizes", self.relative_size_percent.map(|v| [v; 7]));
-        opt!("charOffsets", self.char_offset_percent.map(|v| [v; 7]));
-        if m.is_empty() {
-            return Err(ErrorData::invalid_params(
-                "format 에 적용할 서식이 하나도 없다",
-                None,
-            ));
-        }
-        // rhwp 파서가 공백 없는 `"key":` 를 찾으므로 compact 직렬화여야 한다.
-        Ok(serde_json::Value::Object(m).to_string())
-    }
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyParaFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
+    pub para: usize,
+    /// 지정하면 본문 대신 표 셀 문단에 적용한다
+    pub cell: Option<CellTarget>,
+    /// 적용할 문단 서식
+    pub format: ParaFormat,
 }
 
 // ─── 도구 구현 ────────────────────────────────────────────────
@@ -1005,10 +807,7 @@ impl HangulMcp {
     ) -> Result<String, ErrorData> {
         p.format.validate()?;
         self.store.with_session_edit(&p.doc_id, |session| {
-            let cell = p
-                .cell
-                .as_ref()
-                .map(|c| (c.control, c.cell, c.cell_para.unwrap_or(0)));
+            let cell = p.cell.as_ref().map(|c| (c.control, c.cell, c.cell_para()));
             let len = match cell {
                 Some((control, cell, cp)) => session
                     .core
@@ -1039,6 +838,94 @@ impl HangulMcp {
                 None => session
                     .core
                     .apply_char_format_native(p.section, p.para, p.start, p.end, &props),
+            }
+            .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "문단(또는 표 셀 문단)의 글자 서식을 조회한다. [start, end) 범위를 서식이 같은 구간(runs)으로 나눠 각 구간의 서식을 apply_char_format의 format과 같은 형태로 돌려준다."
+    )]
+    pub fn get_char_format(
+        &self,
+        Parameters(p): Parameters<GetCharFormatParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let doc = session.core.document();
+            let para = paragraph_at(doc, p.section, p.para, p.cell.as_ref())?;
+            let len = para.text.chars().count();
+            let start = p.start.unwrap_or(0);
+            let end = p.end.unwrap_or(len);
+            if start > end || end > len {
+                return Err(ErrorData::invalid_params(
+                    format!("범위 [{start}, {end}) 가 잘못됐다 (문단 길이 {len})"),
+                    None,
+                ));
+            }
+            let mut runs = crate::format::char_shape_runs(para, start, end);
+            if runs.is_empty() {
+                // 빈 범위도 그 위치에 입력될 글자의 서식을 알려준다.
+                runs.push((start, end, para.char_shape_id_at(start).unwrap_or(0)));
+            }
+            let runs: Vec<_> = runs
+                .into_iter()
+                .map(|(s, e, id)| {
+                    let cs = doc.doc_info.char_shapes.get(id as usize).ok_or_else(|| {
+                        ErrorData::internal_error(format!("글자 모양 {id} 이 문서에 없다"), None)
+                    })?;
+                    let (format, per_language) = CharFormat::from_shape(doc, cs);
+                    Ok(json!({
+                        "start": s,
+                        "end": e,
+                        "format": format,
+                        "per_language": per_language,
+                    }))
+                })
+                .collect::<Result<_, ErrorData>>()?;
+            Ok(json!({ "length": len, "runs": runs }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "문단(또는 표 셀 문단)의 문단 서식(정렬, 줄 간격, 여백, 들여쓰기, 문단 간격, 줄 나눔 등)을 apply_para_format의 format과 같은 형태로 조회한다."
+    )]
+    pub fn get_para_format(
+        &self,
+        Parameters(p): Parameters<ParaTargetParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let doc = session.core.document();
+            let para = paragraph_at(doc, p.section, p.para, p.cell.as_ref())?;
+            let id = para.para_shape_id;
+            let ps = doc.doc_info.para_shapes.get(id as usize).ok_or_else(|| {
+                ErrorData::internal_error(format!("문단 모양 {id} 이 문서에 없다"), None)
+            })?;
+            Ok(json!({ "format": ParaFormat::from_shape(ps) }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "문단(또는 표 셀 문단)에 문단 서식을 적용한다. 정렬, 줄 간격(%/pt), 왼쪽·오른쪽 여백, 첫 줄 들여쓰기/내어쓰기, 문단 위·아래 간격, 다음 문단과 함께, 문단 보호, 쪽 나눔, 줄 나눔 단위. format에 지정한 항목만 바뀐다."
+    )]
+    pub fn apply_para_format(
+        &self,
+        Parameters(p): Parameters<ApplyParaFormatParams>,
+    ) -> Result<String, ErrorData> {
+        p.format.validate()?;
+        let props = p.format.to_rhwp_props()?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            match &p.cell {
+                Some(c) => session.core.apply_para_format_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    &props,
+                ),
+                None => session
+                    .core
+                    .apply_para_format_native(p.section, p.para, &props),
             }
             .map_err(hwp_err)
         })
@@ -1328,7 +1215,8 @@ impl ServerHandler for HangulMcp {
                  save_document로 저장한다. 양식(누름틀) 문서는 list_fields로 필드 이름을 보고 \
                  set_field_value(name, value)로 채운다. 양식 개체(버튼/체크박스/콤보박스/에디트)는 \
                  list_forms로 좌표를 보고 set_form_value(section, para, control, ...)로 채운다. \
-                 글자 서식(색/굵게/크기/글꼴 등)은 apply_char_format으로 범위를 지정해 바꾼다. \
+                 글자 서식(색/굵게/크기/글꼴 등)은 apply_char_format, 문단 서식(정렬/줄 간격/여백 등)은 \
+                 apply_para_format으로 바꾸고, 현재 서식은 get_char_format/get_para_format으로 본다. \
                  모든 인덱스는 0-기반, 문자 위치는 char 단위다. \
                  편집은 메모리에서만 일어나며 save_document 전에는 파일이 바뀌지 않는다.",
             )

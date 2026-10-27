@@ -4,11 +4,15 @@
 
 use std::path::PathBuf;
 
+use hangul_mcp::format::{
+    Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
+};
 use hangul_mcp::server::{
-    ApplyCharFormatParams, CellTarget, CharFormat, DocIdParams, FieldByNameParams,
-    FitTableToPageParams, FormAtParams, GetTableParams, HangulMcp, InsertTableColumnParams,
-    InsertTableRowParams, InsertTextParams, OpenDocumentParams, ParaParams, ReplaceTextParams,
-    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
+    ApplyCharFormatParams, ApplyParaFormatParams, DocIdParams, FieldByNameParams,
+    FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams, HangulMcp,
+    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, OpenDocumentParams,
+    ParaParams, ParaTargetParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
+    SetFieldValueParams, SetFormValueParams, SplitParagraphParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -782,10 +786,6 @@ fn char_shape_at<'a>(
     &doc.doc_info.char_shapes[id as usize]
 }
 
-fn empty_format() -> CharFormat {
-    serde_json::from_str("{}").unwrap()
-}
-
 /// HWP ColorRef 는 0x00BBGGRR — 빨강 #FF0000 은 0x0000FF.
 const RED_BGR: u32 = 0x0000FF;
 
@@ -810,7 +810,7 @@ fn apply_char_format_body_roundtrip() {
         font_size_pt: Some(14.0),
         font_name: Some("hangul-mcp 테스트 글꼴".to_string()),
         text_color: Some("#FF0000".to_string()),
-        ..empty_format()
+        ..CharFormat::default()
     };
     server
         .apply_char_format(Parameters(ApplyCharFormatParams {
@@ -902,7 +902,7 @@ fn apply_char_format_cell_roundtrip() {
             format: CharFormat {
                 italic: Some(true),
                 text_color: Some("#ff0000".to_string()),
-                ..empty_format()
+                ..CharFormat::default()
             },
         }))
         .expect("apply_char_format (cell)");
@@ -951,7 +951,7 @@ fn apply_char_format_rejects_invalid_input() {
     };
     let red = || CharFormat {
         text_color: Some("#FF0000".to_string()),
-        ..empty_format()
+        ..CharFormat::default()
     };
     let cases: Vec<(&str, Result<String, rmcp::ErrorData>)> = vec![
         (
@@ -961,11 +961,11 @@ fn apply_char_format_rejects_invalid_input() {
                 1,
                 CharFormat {
                     text_color: Some("red".to_string()),
-                    ..empty_format()
+                    ..CharFormat::default()
                 },
             ),
         ),
-        ("빈 서식", call(0, 1, empty_format())),
+        ("빈 서식", call(0, 1, CharFormat::default())),
         ("start == end", call(1, 1, red())),
         ("end 가 문단 길이 초과", call(0, 100_000, red())),
         (
@@ -975,7 +975,7 @@ fn apply_char_format_rejects_invalid_input() {
                 1,
                 CharFormat {
                     ratio_percent: Some(10),
-                    ..empty_format()
+                    ..CharFormat::default()
                 },
             ),
         ),
@@ -987,7 +987,7 @@ fn apply_char_format_rejects_invalid_input() {
                 CharFormat {
                     superscript: Some(true),
                     subscript: Some(true),
-                    ..empty_format()
+                    ..CharFormat::default()
                 },
             ),
         ),
@@ -1002,6 +1002,263 @@ fn apply_char_format_rejects_invalid_input() {
     }
 
     // 거부된 호출은 문서를 바꾸지 않아야 한다.
+    let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
+    assert_eq!(docs[0]["dirty"].as_bool(), Some(false), "{docs}");
+}
+
+fn get_char_runs(server: &HangulMcp, doc_id: &str, para: usize, cell: Option<CellTarget>) -> Value {
+    let out = server
+        .get_char_format(Parameters(GetCharFormatParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para,
+            start: None,
+            end: None,
+            cell,
+        }))
+        .expect("get_char_format");
+    serde_json::from_str(&out).unwrap()
+}
+
+/// get_char_format 은 적용한 범위를 별도 구간으로 돌려주고, 그 구간의 format 은 그대로
+/// apply_char_format 입력이 될 수 있어야 한다 (입출력 타입·단위 공유).
+#[test]
+fn get_char_format_reports_runs_and_roundtrips_into_apply() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+            text: "빨간마커".to_string(),
+        }))
+        .expect("insert_text");
+    let before = get_char_runs(&server, &doc_id, 0, None);
+    let plain_format = before["runs"][0]["format"].clone();
+
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            start: 0,
+            end: 4,
+            cell: None,
+            format: CharFormat {
+                text_color: Some("#FF0000".to_string()),
+                font_size_pt: Some(15.5),
+                ..CharFormat::default()
+            },
+        }))
+        .expect("apply_char_format");
+
+    let after = get_char_runs(&server, &doc_id, 0, None);
+    let runs = after["runs"].as_array().unwrap();
+    assert_eq!(runs[0]["start"], 0, "{after}");
+    assert_eq!(runs[0]["end"], 4, "{after}");
+    assert_eq!(runs[0]["format"]["text_color"], "#ff0000", "{after}");
+    assert_eq!(runs[0]["format"]["font_size_pt"], 15.5, "{after}");
+    assert_eq!(runs[1]["start"], 4, "{after}");
+    assert_eq!(
+        runs[1]["format"], plain_format,
+        "범위 밖 서식이 바뀜: {after}"
+    );
+    assert_eq!(
+        runs.last().unwrap()["end"],
+        after["length"],
+        "구간이 문단 끝까지 덮지 않음: {after}"
+    );
+
+    // 조회한 원래 서식을 그대로 되돌려 적용하면 범위가 원래 서식으로 돌아와야 한다.
+    let restore: CharFormat = serde_json::from_value(plain_format.clone()).unwrap();
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            start: 0,
+            end: 4,
+            cell: None,
+            format: restore,
+        }))
+        .expect("조회 결과를 apply 입력으로 쓰기");
+    let restored = get_char_runs(&server, &doc_id, 0, None);
+    assert_eq!(restored["runs"][0]["format"], plain_format, "{restored}");
+}
+
+fn get_para(server: &HangulMcp, doc_id: &str, para: usize, cell: Option<CellTarget>) -> Value {
+    let out = server
+        .get_para_format(Parameters(ParaTargetParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para,
+            cell,
+        }))
+        .expect("get_para_format");
+    serde_json::from_str::<Value>(&out).unwrap()["format"].clone()
+}
+
+fn sample_para_format() -> ParaFormat {
+    ParaFormat {
+        alignment: Some(Alignment::Center),
+        line_spacing: Some(LineSpacing {
+            kind: LineSpacingKind::Percent,
+            value: 200.0,
+        }),
+        margin_left_pt: Some(10.0),
+        indent_pt: Some(-5.0),
+        spacing_before_pt: Some(6.0),
+        keep_with_next: Some(true),
+        ..ParaFormat::default()
+    }
+}
+
+fn assert_sample_para(label: &str, f: &Value) {
+    assert_eq!(f["alignment"], "Center", "{label}: {f}");
+    assert_eq!(f["line_spacing"]["kind"], "Percent", "{label}: {f}");
+    assert_eq!(f["line_spacing"]["value"], 200.0, "{label}: {f}");
+    assert_eq!(f["margin_left_pt"], 10.0, "{label}: {f}");
+    assert_eq!(f["indent_pt"], -5.0, "{label}: {f}");
+    assert_eq!(f["spacing_before_pt"], 6.0, "{label}: {f}");
+    assert_eq!(f["keep_with_next"], true, "{label}: {f}");
+}
+
+/// 문단 서식은 그 문단에만 적용되고, HWPX·HWP 저장본을 다시 열어도 유지돼야 한다.
+#[test]
+fn apply_para_format_body_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    // 픽스처는 문단이 하나라, 나눠서 서식이 같은 옆 문단을 만든다.
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 1,
+        }))
+        .expect("split_paragraph");
+    let neighbour_before = get_para(&server, &doc_id, 1, None);
+    server
+        .apply_para_format(Parameters(ApplyParaFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            format: sample_para_format(),
+        }))
+        .expect("apply_para_format");
+    assert_sample_para("메모리", &get_para(&server, &doc_id, 0, None));
+    assert_eq!(
+        get_para(&server, &doc_id, 1, None),
+        neighbour_before,
+        "옆 문단 서식이 바뀜"
+    );
+
+    for name in ["para_format.hwpx", "para_format.hwp"] {
+        let path = temp_out(name);
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.clone(),
+                output_path: Some(path.clone()),
+            }))
+            .expect("save_document");
+        let (reopened, _) = open(&server, &path);
+        assert_sample_para(name, &get_para(&server, &reopened, 0, None));
+    }
+}
+
+#[test]
+fn apply_para_format_cell_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_table.hwpx"));
+    let structure: Value = serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .expect("get_structure"),
+    )
+    .unwrap();
+    let (section, para, control) = find_first_table(&structure).expect("픽스처에 표 없음");
+    assert_eq!(section, 0, "테스트 헬퍼는 구역 0 만 본다");
+    let cell = || {
+        Some(CellTarget {
+            control,
+            cell: 0,
+            cell_para: None,
+        })
+    };
+    server
+        .apply_para_format(Parameters(ApplyParaFormatParams {
+            doc_id: doc_id.clone(),
+            section,
+            para,
+            cell: cell(),
+            format: sample_para_format(),
+        }))
+        .expect("apply_para_format (cell)");
+    assert_sample_para("셀 메모리", &get_para(&server, &doc_id, para, cell()));
+
+    let path = temp_out("para_format_cell.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(path.clone()),
+        }))
+        .expect("save_document");
+    let (reopened, _) = open(&server, &path);
+    assert_sample_para("셀 저장본", &get_para(&server, &reopened, para, cell()));
+}
+
+#[test]
+fn apply_para_format_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let cases = [
+        ("빈 서식", ParaFormat::default()),
+        (
+            "줄 간격 0%",
+            ParaFormat {
+                line_spacing: Some(LineSpacing {
+                    kind: LineSpacingKind::Percent,
+                    value: 0.0,
+                }),
+                ..ParaFormat::default()
+            },
+        ),
+        (
+            "음수 여백",
+            ParaFormat {
+                margin_left_pt: Some(-1.0),
+                ..ParaFormat::default()
+            },
+        ),
+        (
+            "NaN 간격",
+            ParaFormat {
+                spacing_after_pt: Some(f64::NAN),
+                ..ParaFormat::default()
+            },
+        ),
+    ];
+    for (label, format) in cases {
+        let err = server
+            .apply_para_format(Parameters(ApplyParaFormatParams {
+                doc_id: doc_id.clone(),
+                section: 0,
+                para: 0,
+                cell: None,
+                format,
+            }))
+            .expect_err(label);
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "{label}: {err:?}"
+        );
+    }
     let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
     assert_eq!(docs[0]["dirty"].as_bool(), Some(false), "{docs}");
 }

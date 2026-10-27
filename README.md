@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (31)
+## Tools (34)
 
 **Session**
 
@@ -90,10 +90,16 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `split_paragraph(doc_id, section, para, char_offset)` | Split a paragraph |
 | `merge_paragraph(doc_id, section, para)` | Merge with the previous paragraph |
 
-**Character formatting**
+**Formatting**
+
+`get_*` results use the same shape and units as the `format` input of the matching
+`apply_*` tool, so a format read from one place can be applied elsewhere as is.
 
 | Tool | Description |
 |------|-------------|
+| `get_char_format(doc_id, section, para, start?, end?, cell?)` | Character formatting of a paragraph range, split into runs of identical formatting → `{length, runs: [{start, end, format, per_language}]}` |
+| `get_para_format(doc_id, section, para, cell?)` | Paragraph formatting → `{format}` |
+| `apply_para_format(doc_id, section, para, cell?, format)` | Apply paragraph formatting: `alignment` (`Justify`/`Left`/`Right`/`Center`/`Distribute`/`Split`), `line_spacing` (`{kind: Percent\|Fixed\|SpaceOnly\|Minimum, value}`; `%` for `Percent`, pt otherwise), `margin_left_pt`, `margin_right_pt`, `indent_pt` (negative = hanging), `spacing_before_pt`, `spacing_after_pt`, `keep_with_next`, `keep_lines`, `page_break_before`, `widow_orphan`, `korean_break_unit`, `english_break_unit`. Only the given fields change |
 | `apply_char_format(doc_id, section, para, start, end, cell?, format)` | Apply character formatting to the `[start, end)` range of a body paragraph, or of a table cell paragraph when `cell = {control, cell, cell_para?}` is given. `format` fields are all optional and only the given ones change: `bold`, `italic`, `underline`, `underline_type`, `underline_shape`, `underline_color`, `strikethrough`, `strike_shape`, `strike_color`, `font_size_pt`, `font_name`, `text_color`, `shade_color`, `outline_type`, `shadow_type`, `shadow_color`, `shadow_offset_x/y`, `superscript`, `subscript`, `emboss`, `engrave`, `emphasis_dot`, `kerning`, `ratio_percent`, `spacing_percent`, `relative_size_percent`, `char_offset_percent`. Colors are `"#RRGGBB"` |
 
 **Table editing**
