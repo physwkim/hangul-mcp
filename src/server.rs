@@ -240,6 +240,16 @@ pub struct SaveDocumentParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct RenderPageParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 쪽 번호 (0-기반, open_document의 page_count 미만)
+    pub page: u32,
+    /// 출력 파일 경로. 확장자 .svg 또는 .pdf로 형식을 고른다
+    pub output_path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct DocIdParams {
     /// open_document가 반환한 문서 핸들
     pub doc_id: String,
@@ -845,6 +855,58 @@ impl HangulMcp {
             session.dirty = false;
             Ok(json!({
                 "saved_path": target.display().to_string(),
+                "bytes": bytes.len(),
+            })
+            .to_string())
+        })
+    }
+
+    #[tool(
+        description = "문서의 한 쪽을 조판해 SVG(.svg) 또는 PDF(.pdf) 파일로 쓴다. 편집 결과를 저장 전에 눈으로 확인할 때 쓴다. page는 0-기반."
+    )]
+    pub fn render_page(
+        &self,
+        Parameters(p): Parameters<RenderPageParams>,
+    ) -> Result<String, ErrorData> {
+        let target = PathBuf::from(&p.output_path);
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        self.store.with_session(&p.doc_id, |session| {
+            let page_count = session.core.page_count();
+            if p.page >= page_count {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "page {} 가 범위를 넘는다 (전체 {page_count}쪽, 0-기반)",
+                        p.page
+                    ),
+                    None,
+                ));
+            }
+            let bytes = match ext.as_deref() {
+                Some("svg") => session
+                    .core
+                    .render_page_svg_native(p.page)
+                    .map(String::into_bytes),
+                Some("pdf") => session.core.render_pages_pdf_native(&[p.page]),
+                _ => {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "출력 경로 확장자는 .svg 또는 .pdf여야 한다: {}",
+                            target.display()
+                        ),
+                        None,
+                    ))
+                }
+            }
+            .map_err(hwp_err)?;
+            std::fs::write(&target, &bytes)
+                .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
+            Ok(json!({
+                "page": p.page,
+                "page_count": page_count,
+                "path": target.display().to_string(),
                 "bytes": bytes.len(),
             })
             .to_string())

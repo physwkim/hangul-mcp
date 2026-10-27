@@ -14,9 +14,9 @@ use hangul_mcp::server::{
     HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
     MergeTableCellsParams, NoteKind, OpenDocumentParams, ParaParams, ParaTargetParams,
-    ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
-    SetFormValueParams, SetHeaderFooterParams, SplitParagraphParams, SplitTableCellParams,
-    StyleRef,
+    RenderPageParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
+    SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SplitParagraphParams,
+    SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -2410,4 +2410,81 @@ fn set_header_footer_rejects_multiline() {
         header["exists"], false,
         "거부된 호출이 머리말을 만듦: {header}"
     );
+}
+
+fn render(
+    server: &HangulMcp,
+    doc_id: &str,
+    page: u32,
+    out: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.render_page(Parameters(RenderPageParams {
+        doc_id: doc_id.to_string(),
+        page,
+        output_path: out.to_string(),
+    }))
+}
+
+/// 편집 중(미저장) 상태가 렌더링에 반영돼야 한다: 쪽 나누기 뒤 둘째 쪽을 그릴 수 있고,
+/// 넣은 글자가 SVG 글자 요소로 나와야 한다.
+#[test]
+fn render_page_svg_and_pdf_reflect_unsaved_edits() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_break(&server, &doc_id, 3, None).expect("insert_break");
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 1,
+            char_offset: 0,
+            text: "쪽".to_string(),
+        }))
+        .expect("insert_text");
+
+    let svg_path = temp_out("page1.svg");
+    let out: Value =
+        serde_json::from_str(&render(&server, &doc_id, 1, &svg_path).expect("svg")).unwrap();
+    assert_eq!(out["page_count"], 2, "{out}");
+    let svg = std::fs::read_to_string(&svg_path).unwrap();
+    assert!(
+        svg.starts_with("<svg"),
+        "SVG 아님: {}",
+        &svg[..80.min(svg.len())]
+    );
+    assert!(svg.contains(">쪽<"), "둘째 쪽 SVG 에 넣은 글자가 없음");
+
+    let pdf_path = temp_out("page0.pdf");
+    render(&server, &doc_id, 0, &pdf_path).expect("pdf");
+    assert!(
+        std::fs::read(&pdf_path).unwrap().starts_with(b"%PDF-"),
+        "PDF 아님"
+    );
+
+    let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
+    let entry = docs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["doc_id"] == doc_id.as_str())
+        .unwrap();
+    assert_eq!(entry["dirty"], true, "렌더링이 미저장 표시를 지움: {entry}");
+}
+
+#[test]
+fn render_page_rejects_bad_page_and_extension() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let png = temp_out("page.png");
+    assert!(
+        render(&server, &doc_id, 0, &png).is_err(),
+        ".png 는 거부돼야 함"
+    );
+    assert!(!PathBuf::from(&png).exists());
+    let svg = temp_out("page_oob.svg");
+    assert!(
+        render(&server, &doc_id, 1, &svg).is_err(),
+        "1쪽 문서의 page 1 은 거부돼야 함"
+    );
+    assert!(!PathBuf::from(&svg).exists());
 }
