@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (36)
+## Tools (39)
 
 **Session**
 
@@ -108,6 +108,7 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 
 | Tool | Description |
 |------|-------------|
+| `create_table(doc_id, section, para, char_offset, rows, cols, column_widths_percent?, column_widths?, repeat_header?)` | Insert a new table; returns its `paraIdx`/`controlIdx` |
 | `set_cell_text(doc_id, section, para, control, cell, cell_para?, text)` | Replace a cell paragraph's text |
 | `insert_table_row(doc_id, section, para, control, row, below?)` | Insert a row |
 | `insert_table_column(doc_id, section, para, control, col, right?)` | Insert a column |
@@ -115,6 +116,8 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `delete_table_column(doc_id, section, para, control, col)` | Delete a column |
 | `fit_table_to_page(doc_id, section, para, control)` | Shrink the table to fit the body width |
 | `set_table_column_widths(doc_id, section, para, control, widths)` | Set per-column widths directly |
+| `merge_table_cells(doc_id, section, para, control, start_row, start_col, end_row, end_col)` | Merge a rectangular cell range (inclusive) |
+| `split_table_cell(doc_id, section, para, control, row, col, rows?, cols?)` | Unmerge a merged cell, or split a cell into `rows`×`cols` |
 
 **Fields (누름틀)** — filling in form documents
 

@@ -291,6 +291,68 @@ pub struct SetTableColumnWidthsParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct CreateTableParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표를 삽입할 문단 인덱스
+    pub para: usize,
+    /// 삽입 위치 (char 단위). 문단 중간이면 문단을 나눠 그 사이에 표 문단을 넣는다
+    pub char_offset: usize,
+    /// 행 수 (1 이상)
+    pub rows: u16,
+    /// 열 수 (1~256)
+    pub cols: u16,
+    /// 열 폭 비율(%) 목록. 길이는 cols, 합은 100. column_widths와 함께 쓸 수 없다
+    pub column_widths_percent: Option<Vec<f64>>,
+    /// 열 폭 절대값(HWPUNIT) 목록. 길이는 cols. 생략하면 본문 폭을 균등 분할
+    pub column_widths: Option<Vec<u32>>,
+    /// true면 첫 행을 쪽마다 반복되는 머리행으로 지정한다
+    pub repeat_header: Option<bool>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct MergeTableCellsParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표가 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스
+    pub control: usize,
+    /// 병합 시작 행 (포함)
+    pub start_row: u16,
+    /// 병합 시작 열 (포함)
+    pub start_col: u16,
+    /// 병합 끝 행 (포함)
+    pub end_row: u16,
+    /// 병합 끝 열 (포함)
+    pub end_col: u16,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SplitTableCellParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표가 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스
+    pub control: usize,
+    /// 대상 셀의 행 (병합 셀이면 왼쪽 위 행)
+    pub row: u16,
+    /// 대상 셀의 열 (병합 셀이면 왼쪽 위 열)
+    pub col: u16,
+    /// 나눌 줄 수. rows/cols를 모두 생략하면 병합만 해제한다
+    pub rows: Option<u16>,
+    /// 나눌 칸 수. rows/cols를 모두 생략하면 병합만 해제한다
+    pub cols: Option<u16>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct FieldByNameParams {
     /// 문서 핸들
     pub doc_id: String,
@@ -1034,6 +1096,100 @@ impl HangulMcp {
     }
 
     // ── 표 편집 ──
+
+    #[tool(
+        description = "문단의 char_offset 위치에 rows×cols 새 표를 삽입한다. 반환값의 paraIdx/controlIdx가 표의 para/control 좌표다. 열 폭은 column_widths_percent(합 100) 또는 column_widths(HWPUNIT) 중 하나로 지정, 생략 시 균등."
+    )]
+    pub fn create_table(
+        &self,
+        Parameters(p): Parameters<CreateTableParams>,
+    ) -> Result<String, ErrorData> {
+        let column_widths = match (p.column_widths_percent, p.column_widths) {
+            (Some(_), Some(_)) => {
+                return Err(ErrorData::invalid_params(
+                    "column_widths_percent와 column_widths는 함께 쓸 수 없음",
+                    None,
+                ))
+            }
+            (Some(pct), None) => Some(rhwp::document_core::TableColumnWidths::Percent(pct)),
+            (None, Some(abs)) => Some(rhwp::document_core::TableColumnWidths::Absolute(abs)),
+            (None, None) => None,
+        };
+        let options = rhwp::document_core::TableCreationOptions {
+            column_widths,
+            column_alignments: None,
+            repeat_header: p.repeat_header,
+        };
+        self.store.with_session_edit(&p.doc_id, |session| {
+            session
+                .core
+                .create_table_with_options_native(
+                    p.section,
+                    p.para,
+                    p.char_offset,
+                    p.rows,
+                    p.cols,
+                    &options,
+                )
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "표의 (start_row,start_col)~(end_row,end_col) 직사각형 범위 셀을 하나로 병합한다 (끝 포함). 범위가 기존 병합 셀과 일부만 겹치면 거부된다."
+    )]
+    pub fn merge_table_cells(
+        &self,
+        Parameters(p): Parameters<MergeTableCellsParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            session
+                .core
+                .merge_table_cells_native(
+                    p.section,
+                    p.para,
+                    p.control,
+                    p.start_row,
+                    p.start_col,
+                    p.end_row,
+                    p.end_col,
+                )
+                .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "표 셀을 나눈다. rows/cols를 생략하면 병합 셀의 병합을 해제하고, 지정하면 셀을 rows줄 × cols칸으로 나눈다 (병합 셀은 먼저 해제)."
+    )]
+    pub fn split_table_cell(
+        &self,
+        Parameters(p): Parameters<SplitTableCellParams>,
+    ) -> Result<String, ErrorData> {
+        let split_into = match (p.rows, p.cols) {
+            (None, None) => None,
+            (rows, cols) => {
+                let (rows, cols) = (rows.unwrap_or(1), cols.unwrap_or(1));
+                if rows == 0 || cols == 0 || (rows == 1 && cols == 1) {
+                    return Err(ErrorData::invalid_params(
+                        format!("rows×cols={rows}×{cols}: 1 이상이고 1×1이 아니어야 함"),
+                        None,
+                    ));
+                }
+                Some((rows, cols))
+            }
+        };
+        self.store.with_session_edit(&p.doc_id, |session| {
+            match split_into {
+                None => session
+                    .core
+                    .split_table_cell_native(p.section, p.para, p.control, p.row, p.col),
+                Some((rows, cols)) => session.core.split_table_cell_into_native(
+                    p.section, p.para, p.control, p.row, p.col, rows, cols, true, true,
+                ),
+            }
+            .map_err(hwp_err)
+        })
+    }
 
     #[tool(
         description = "표 셀 문단의 텍스트를 통째로 교체한다 (기존 텍스트 삭제 후 삽입). 셀에 문단이 여러 개면 cell_para로 지정."

@@ -8,11 +8,12 @@ use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::server::{
-    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, DocIdParams, FieldByNameParams,
-    FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams, HangulMcp,
-    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, OpenDocumentParams,
-    ParaParams, ParaTargetParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
-    SetFieldValueParams, SetFormValueParams, SplitParagraphParams, StyleRef,
+    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, CreateTableParams, DocIdParams,
+    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams,
+    HangulMcp, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
+    MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams,
+    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
+    SplitParagraphParams, SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -1440,4 +1441,262 @@ fn apply_style_outline_sets_heading() {
         assert_eq!(para_heading(&server, &reopened), heading, "{name}");
         assert_eq!(para_style(&server, &reopened)["name"], "개요 1", "{name}");
     }
+}
+
+/// 세션을 .hwpx 와 .hwp 로 각각 저장하고 두 저장본을 재파싱해 돌려준다.
+fn save_both(
+    server: &HangulMcp,
+    doc_id: &str,
+    stem: &str,
+) -> Vec<(&'static str, rhwp::model::document::Document)> {
+    let mut out = Vec::new();
+    for ext in ["hwpx", "hwp"] {
+        let path = temp_out(&format!("{stem}.{ext}"));
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.to_string(),
+                output_path: Some(path.clone()),
+            }))
+            .unwrap_or_else(|e| panic!("save {ext}: {e:?}"));
+        let bytes = std::fs::read(&path).unwrap();
+        let doc = if ext == "hwpx" {
+            rhwp::parser::hwpx::parse_hwpx(&bytes).expect("HWPX 재파싱")
+        } else {
+            rhwp::parser::parse_hwp(&bytes).expect("HWP 재파싱")
+        };
+        out.push((ext, doc));
+    }
+    out
+}
+
+fn table_at(
+    doc: &rhwp::model::document::Document,
+    para: usize,
+    control: usize,
+) -> &rhwp::model::table::Table {
+    match doc.sections[0].paragraphs[para].controls.get(control) {
+        Some(rhwp::model::control::Control::Table(t)) => t,
+        other => panic!(
+            "문단 {para} 컨트롤 {control} 이 표가 아님: {:?}",
+            other.map(|_| ())
+        ),
+    }
+}
+
+fn create_table(server: &HangulMcp, doc_id: &str, rows: u16, cols: u16) -> (usize, usize) {
+    let out = server
+        .create_table(Parameters(CreateTableParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+            rows,
+            cols,
+            column_widths_percent: None,
+            column_widths: None,
+            repeat_header: None,
+        }))
+        .expect("create_table");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    (
+        v["paraIdx"].as_u64().unwrap() as usize,
+        v["controlIdx"].as_u64().unwrap() as usize,
+    )
+}
+
+/// 새 표 생성 → 셀 텍스트 → 병합까지 HWPX/HWP 저장본 양쪽에 남아야 한다.
+#[test]
+fn create_table_and_merge_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (para, control) = create_table(&server, &doc_id, 3, 4);
+
+    let table: Value = serde_json::from_str(
+        &server
+            .get_table(Parameters(GetTableParams {
+                doc_id: doc_id.clone(),
+                section: 0,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        (table["rows"].as_u64(), table["cols"].as_u64()),
+        (Some(3), Some(4))
+    );
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            control,
+            cell: cell_index(&table, 2, 3),
+            cell_para: None,
+            text: "새표마커".to_string(),
+        }))
+        .expect("set_cell_text");
+    server
+        .merge_table_cells(Parameters(MergeTableCellsParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            control,
+            start_row: 0,
+            start_col: 0,
+            end_row: 1,
+            end_col: 1,
+        }))
+        .expect("merge_table_cells");
+
+    for (ext, doc) in save_both(&server, &doc_id, "create_merge") {
+        let t = table_at(&doc, para, control);
+        assert_eq!((t.row_count, t.col_count), (3, 4), "{ext} 표 크기");
+        let master = t.cells.iter().find(|c| c.row == 0 && c.col == 0).unwrap();
+        assert_eq!(
+            (master.row_span, master.col_span),
+            (2, 2),
+            "{ext} 병합 span"
+        );
+        assert_eq!(t.cells.len(), 12 - 3, "{ext} 병합 후 셀 수");
+        let marked = t.cells.iter().find(|c| c.row == 2 && c.col == 3).unwrap();
+        assert_eq!(marked.paragraphs[0].text, "새표마커", "{ext} 셀 텍스트");
+    }
+}
+
+fn split_cell(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    (row, col): (u16, u16),
+    rows: Option<u16>,
+    cols: Option<u16>,
+) -> Result<String, rmcp::ErrorData> {
+    server.split_table_cell(Parameters(SplitTableCellParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+        row,
+        col,
+        rows,
+        cols,
+    }))
+}
+
+/// rows/cols 를 생략하면 병합 해제: 2×2 의 첫 행을 병합했다 풀면 셀 4개가 돌아와야 한다.
+#[test]
+fn split_table_cell_unmerge_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = create_table(&server, &doc_id, 2, 2);
+    server
+        .merge_table_cells(Parameters(MergeTableCellsParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: at.0,
+            control: at.1,
+            start_row: 0,
+            start_col: 0,
+            end_row: 0,
+            end_col: 1,
+        }))
+        .expect("merge_table_cells");
+    split_cell(&server, &doc_id, at, (0, 0), None, None).expect("병합 해제");
+
+    for (ext, doc) in save_both(&server, &doc_id, "unmerge_cell") {
+        let t = table_at(&doc, at.0, at.1);
+        assert_eq!((t.row_count, t.col_count), (2, 2), "{ext} 표 크기");
+        assert_eq!(t.cells.len(), 4, "{ext} 셀 수");
+        assert!(
+            t.cells.iter().all(|c| c.row_span == 1 && c.col_span == 1),
+            "{ext} 병합이 남아 있음"
+        );
+    }
+}
+
+/// rows/cols 를 지정하면 N×M 나누기: 2×2 의 (1,1) 을 2줄×3칸으로 나누면
+/// 행 1개·열 2개가 늘고 그 자리에 1×1 조각 6개가 생겨야 한다.
+#[test]
+fn split_table_cell_into_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = create_table(&server, &doc_id, 2, 2);
+    split_cell(&server, &doc_id, at, (1, 1), Some(2), Some(3)).expect("2×3 나누기");
+
+    for (ext, doc) in save_both(&server, &doc_id, "split_cell_into") {
+        let t = table_at(&doc, at.0, at.1);
+        assert_eq!((t.row_count, t.col_count), (3, 4), "{ext} 나눈 뒤 표 크기");
+        let pieces = t
+            .cells
+            .iter()
+            .filter(|c| c.row >= 1 && c.col >= 1 && c.row_span == 1 && c.col_span == 1)
+            .count();
+        assert_eq!(pieces, 6, "{ext} 나눈 조각 수");
+    }
+}
+
+#[test]
+fn table_tools_reject_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let both_widths = server.create_table(Parameters(CreateTableParams {
+        doc_id: doc_id.clone(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        rows: 2,
+        cols: 2,
+        column_widths_percent: Some(vec![50.0, 50.0]),
+        column_widths: Some(vec![1000, 1000]),
+        repeat_header: None,
+    }));
+    assert!(both_widths.is_err(), "폭 두 종류 동시 지정은 거부돼야 함");
+    let bad_pct = server.create_table(Parameters(CreateTableParams {
+        doc_id: doc_id.clone(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        rows: 2,
+        cols: 2,
+        column_widths_percent: Some(vec![30.0, 30.0]),
+        column_widths: None,
+        repeat_header: None,
+    }));
+    assert!(bad_pct.is_err(), "합이 100이 아닌 비율은 거부돼야 함");
+    let zero_rows = server.create_table(Parameters(CreateTableParams {
+        doc_id: doc_id.clone(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        rows: 0,
+        cols: 2,
+        column_widths_percent: None,
+        column_widths: None,
+        repeat_header: None,
+    }));
+    assert!(zero_rows.is_err(), "0행 표는 거부돼야 함");
+
+    let (para, control) = create_table(&server, &doc_id, 2, 2);
+    let merge_oob = server.merge_table_cells(Parameters(MergeTableCellsParams {
+        doc_id: doc_id.clone(),
+        section: 0,
+        para,
+        control,
+        start_row: 0,
+        start_col: 0,
+        end_row: 2,
+        end_col: 0,
+    }));
+    assert!(merge_oob.is_err(), "표 밖 병합 범위는 거부돼야 함");
+    for (rows, cols) in [(Some(1), Some(1)), (Some(0), Some(2)), (Some(1), None)] {
+        let r = split_cell(&server, &doc_id, (para, control), (0, 0), rows, cols);
+        assert!(r.is_err(), "{rows:?}×{cols:?} 나누기는 거부돼야 함");
+    }
+    let unmerge_plain = split_cell(&server, &doc_id, (para, control), (0, 0), None, None);
+    assert!(
+        unmerge_plain.is_err(),
+        "병합되지 않은 셀의 병합 해제는 거부돼야 함"
+    );
 }
