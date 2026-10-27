@@ -1157,25 +1157,40 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "텍스트를 치환한다. all=true(기본)면 본문 전체, false면 첫 매치만. 표 셀 내부는 본문 매치에 포함되지 않을 수 있으니 셀은 set_cell_text 사용."
+        description = "텍스트를 치환한다 (본문과 표 셀 모두, search_text와 같은 매치). all=true(기본)면 전체, false면 문서 순서 첫 매치만. 일치하는 텍스트가 없으면 오류."
     )]
     pub fn replace_text(
         &self,
         Parameters(p): Parameters<ReplaceTextParams>,
     ) -> Result<String, ErrorData> {
+        if p.query.is_empty() {
+            return Err(ErrorData::invalid_params("query는 비어 있을 수 없음", None));
+        }
         self.store.with_session_edit(&p.doc_id, |session| {
             let case_sensitive = p.case_sensitive.unwrap_or(false);
-            if p.all.unwrap_or(true) {
+            // replace_one_native 는 본문만 찾으므로(search_first_body) 첫 매치도 전체 치환과
+            // 같은 경로(search_all — 셀 포함, 문서 순서)의 0번째로 고른다.
+            let out = if p.all.unwrap_or(true) {
                 session
                     .core
                     .replace_all_native(&p.query, &p.replacement, case_sensitive)
-                    .map_err(hwp_err)
             } else {
                 session
                     .core
-                    .replace_one_native(&p.query, &p.replacement, case_sensitive)
-                    .map_err(hwp_err)
+                    .replace_nth_native(&p.query, &p.replacement, case_sensitive, 0)
             }
+            .map_err(hwp_err)?;
+            let v: Value = serde_json::from_str(&out).map_err(|e| {
+                ErrorData::internal_error(format!("replace_text 결과 해석 실패: {e}"), None)
+            })?;
+            if v["count"].as_u64() == Some(0) {
+                // 바뀐 것이 없으면 되돌리기 기록·dirty 를 남기지 않도록 오류로 돌려준다.
+                return Err(ErrorData::invalid_params(
+                    format!("일치하는 텍스트 없음: {:?}", p.query),
+                    None,
+                ));
+            }
+            Ok(out)
         })
     }
 

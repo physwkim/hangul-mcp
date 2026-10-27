@@ -2667,3 +2667,133 @@ fn undo_reverts_multi_step_tools_as_one_unit() {
         assert!(pictures(&doc).is_empty(), "{ext}: undo 뒤 그림이 남음");
     }
 }
+
+/// 첫 표의 (0,0) 셀과 표 바로 뒤 본문 문단에 같은 글자를 둔 세션.
+/// 반환: (doc_id, 표 문단, 표 컨트롤, 셀 인덱스). 본문 쪽 문단은 표 문단 + 1.
+fn doc_with_cell_and_body_marker(server: &HangulMcp) -> (String, usize, usize, usize) {
+    let (doc_id, _) = open(server, &fixture("ref_table.hwpx"));
+    let structure: Value = serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    let (section, para, control) = find_first_table(&structure).expect("픽스처에 표 없음");
+    assert_eq!(section, 0, "테스트 헬퍼는 구역 0 만 본다");
+    let table: Value = serde_json::from_str(
+        &server
+            .get_table(Parameters(GetTableParams {
+                doc_id: doc_id.clone(),
+                section,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    let cell = cell_index(&table, 0, 0);
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section,
+            para,
+            control,
+            cell,
+            cell_para: None,
+            text: "마커A".to_string(),
+        }))
+        .unwrap();
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section,
+            para: para + 1,
+            char_offset: 0,
+            text: "마커A".to_string(),
+        }))
+        .unwrap();
+    (doc_id, para, control, cell)
+}
+
+fn replace(
+    server: &HangulMcp,
+    doc_id: &str,
+    query: &str,
+    all: bool,
+) -> Result<String, rmcp::ErrorData> {
+    server.replace_text(Parameters(ReplaceTextParams {
+        doc_id: doc_id.to_string(),
+        query: query.to_string(),
+        replacement: "바뀜".to_string(),
+        all: Some(all),
+        case_sensitive: None,
+    }))
+}
+
+fn cell_and_body(
+    doc: &rhwp::model::document::Document,
+    (para, control, cell): (usize, usize, usize),
+) -> (String, String) {
+    (
+        table_at(doc, para, control).cells[cell].paragraphs[0]
+            .text
+            .clone(),
+        doc.sections[0].paragraphs[para + 1].text.clone(),
+    )
+}
+
+/// all=false 는 search_text 와 같은 문서 순서의 첫 매치(표 셀)를 바꿔야 한다 —
+/// rhwp replace_one_native 는 본문만 찾아 셀을 건너뛰고 본문 쪽을 바꾼다.
+#[test]
+fn replace_text_first_match_includes_table_cells() {
+    let server = HangulMcp::new();
+    let (doc_id, para, control, cell) = doc_with_cell_and_body_marker(&server);
+    replace(&server, &doc_id, "마커A", false).expect("replace first");
+    for (ext, doc) in save_both(&server, &doc_id, "replace_first") {
+        assert_eq!(
+            cell_and_body(&doc, (para, control, cell)),
+            ("바뀜".to_string(), "마커A".to_string()),
+            "{ext}"
+        );
+    }
+}
+
+#[test]
+fn replace_text_all_includes_table_cells() {
+    let server = HangulMcp::new();
+    let (doc_id, para, control, cell) = doc_with_cell_and_body_marker(&server);
+    let out: Value =
+        serde_json::from_str(&replace(&server, &doc_id, "마커A", true).unwrap()).unwrap();
+    assert_eq!(out["count"], 2, "{out}");
+    for (ext, doc) in save_both(&server, &doc_id, "replace_all") {
+        assert_eq!(
+            cell_and_body(&doc, (para, control, cell)),
+            ("바뀜".to_string(), "바뀜".to_string()),
+            "{ext}"
+        );
+    }
+}
+
+/// 일치가 없거나 빈 검색어면 오류이고, 되돌리기 기록을 남기지 않는다:
+/// 바로 다음 undo 는 실패한 치환이 아니라 그 전의 본문 insert_text 를 되돌린다.
+#[test]
+fn replace_text_without_match_is_rejected_and_not_recorded() {
+    let server = HangulMcp::new();
+    let (doc_id, para, control, cell) = doc_with_cell_and_body_marker(&server);
+    for (query, all) in [("없는글자", true), ("없는글자", false), ("", true)] {
+        assert!(
+            replace(&server, &doc_id, query, all).is_err(),
+            "{query:?} all={all}"
+        );
+    }
+    undo(&server, &doc_id).expect("undo");
+    for (ext, doc) in save_both(&server, &doc_id, "replace_none") {
+        assert_eq!(
+            cell_and_body(&doc, (para, control, cell)),
+            ("마커A".to_string(), String::new()),
+            "{ext}"
+        );
+    }
+}

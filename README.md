@@ -83,7 +83,7 @@ place in every tool.
 | Tool | Description |
 |------|-------------|
 | `search_text(doc_id, query, case_sensitive?, include_cells?)` | Positions of every match |
-| `replace_text(doc_id, query, replacement, all?, case_sensitive?)` | Replace in body text (all matches or the first) |
+| `replace_text(doc_id, query, replacement, all?, case_sensitive?)` | Replace matches in body text and table cells — the same matches `search_text` finds. `all=true` (default) replaces all, `false` only the first in document order. No match is an error and leaves no undo step |
 
 **Text and paragraph editing**
 
