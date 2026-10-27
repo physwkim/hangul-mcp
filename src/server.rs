@@ -699,7 +699,7 @@ impl HangulMcp {
         self.store.with_session_edit(&p.doc_id, |session| {
             session
                 .core
-                .split_paragraph_native(p.section, p.para, p.char_offset)
+                .split_paragraph_native(p.section, p.para, p.char_offset, None)
                 .map_err(hwp_err)
         })
     }

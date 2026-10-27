@@ -1,7 +1,7 @@
 # hangul-mcp
 
 An MCP (Model Context Protocol) server for editing HWPX documents, built on
-[rhwp](https://github.com/physwkim/rhwp). It opens `.hwpx` (or `.hwp`) files,
+[rhwp](https://github.com/edwardkim/rhwp). It opens `.hwpx` (or `.hwp`) files,
 edits them in memory, and saves them back as HWPX.
 
 ## Requirements
