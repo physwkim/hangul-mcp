@@ -8,7 +8,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rhwp::model::control::Control;
+use rhwp::model::control::{Control, FormObject, FormType};
+use rhwp::model::document::Document;
 use rhwp::DocumentCore;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -268,6 +269,38 @@ fn io_err(context: &str, e: std::io::Error) -> ErrorData {
 }
 
 /// 양식 개체 타입 → 표시 문자열 (rhwp `form_type_to_str`와 동일 표기).
+/// 본문 문단, 또는 cell 이면 그 표 셀 문단의 양식 개체.
+fn form_at<'a>(
+    doc: &'a Document,
+    section: usize,
+    para: usize,
+    cell: Option<&CellTarget>,
+    control: usize,
+) -> Result<&'a FormObject, ErrorData> {
+    match paragraph_at(doc, section, para, cell)?
+        .controls
+        .get(control)
+    {
+        Some(Control::Form(f)) => Ok(f),
+        _ => Err(ErrorData::invalid_params(
+            format!("({section}, {para}, {control}) 위치에 양식 개체 없음"),
+            None,
+        )),
+    }
+}
+
+/// list_forms 항목과 get_form_value 결과의 공통 값 필드 (rhwp get_form_value_native 와 같은 키).
+fn form_value_json(f: &FormObject) -> Value {
+    json!({
+        "formType": form_type_str(f.form_type),
+        "name": f.name,
+        "value": f.value,
+        "text": f.text,
+        "caption": f.caption,
+        "enabled": f.enabled,
+    })
+}
+
 fn form_type_str(ft: rhwp::model::control::FormType) -> &'static str {
     use rhwp::model::control::FormType;
     match ft {
@@ -755,8 +788,10 @@ pub struct FormAtParams {
     pub section: usize,
     /// 문단 인덱스 (0-기반)
     pub para: usize,
-    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값)
+    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값). cell 이면 셀 문단 안의 인덱스
     pub control: usize,
+    /// 표 셀 안의 양식이면 그 셀 (list_forms의 cell 값). para 는 표가 속한 문단
+    pub cell: Option<CellTarget>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -797,8 +832,10 @@ pub struct SetFormValueParams {
     pub section: usize,
     /// 문단 인덱스 (0-기반)
     pub para: usize,
-    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값)
+    /// 문단 내 컨트롤 인덱스 (list_forms의 control 값). cell 이면 셀 문단 안의 인덱스
     pub control: usize,
+    /// 표 셀 안의 양식이면 그 셀 (list_forms의 cell 값). para 는 표가 속한 문단
+    pub cell: Option<CellTarget>,
     /// 체크 상태 (CheckBox/RadioButton: 0=해제, 1=선택)
     pub value: Option<i32>,
     /// 텍스트 내용 (ComboBox 선택값 / Edit 입력값)
@@ -2334,25 +2371,47 @@ impl HangulMcp {
     // ── 양식 개체(폼) ──
 
     #[tool(
-        description = "문서 본문의 모든 양식 개체(버튼/체크박스/라디오/콤보박스/에디트)를 목록으로 반환한다: 위치(section/para/control), 종류, 이름, 값, 캡션, 텍스트. 폼을 채우기 전 좌표를 파악하는 시작점. (표 셀 안의 폼은 미포함)"
+        description = "문서의 모든 양식 개체(버튼/체크박스/라디오/콤보박스/에디트)를 목록으로 반환한다: 위치(section/para/control, 표 셀 안이면 cell), 종류, 이름, 값, 캡션, 텍스트. 폼을 채우기 전 좌표를 파악하는 시작점."
     )]
     pub fn list_forms(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
         self.store.with_session(&p.doc_id, |session| {
             let mut forms = Vec::new();
+            let mut push = |loc: Value, f: &FormObject| {
+                let mut entry = form_value_json(f);
+                entry
+                    .as_object_mut()
+                    .expect("form_value_json 은 객체")
+                    .extend(loc.as_object().expect("위치는 객체").clone());
+                forms.push(entry);
+            };
             for (sec_idx, sec) in session.core.document().sections.iter().enumerate() {
                 for (para_idx, para) in sec.paragraphs.iter().enumerate() {
                     for (ci, ctrl) in para.controls.iter().enumerate() {
-                        if let Control::Form(f) = ctrl {
-                            forms.push(json!({
-                                "section": sec_idx,
-                                "para": para_idx,
-                                "control": ci,
-                                "formType": form_type_str(f.form_type),
-                                "name": f.name.as_str(),
-                                "value": f.value,
-                                "caption": f.caption.as_str(),
-                                "text": f.text.as_str(),
-                            }));
+                        match ctrl {
+                            Control::Form(f) => push(
+                                json!({"section": sec_idx, "para": para_idx, "control": ci}),
+                                f,
+                            ),
+                            Control::Table(t) => {
+                                for (cell_idx, cell) in t.cells.iter().enumerate() {
+                                    for (cp, cell_para) in cell.paragraphs.iter().enumerate() {
+                                        for (fci, fc) in cell_para.controls.iter().enumerate() {
+                                            if let Control::Form(f) = fc {
+                                                push(
+                                                    json!({
+                                                        "section": sec_idx,
+                                                        "para": para_idx,
+                                                        "control": fci,
+                                                        "cell": {"control": ci, "cell": cell_idx, "cell_para": cp},
+                                                    }),
+                                                    f,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -2362,37 +2421,71 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "양식 개체의 현재 값을 조회한다 (종류/이름/값/텍스트/캡션/활성). 위치(section/para/control)는 list_forms로 파악한다."
+        description = "양식 개체의 현재 값을 조회한다 (종류/이름/값/텍스트/캡션/활성). 위치(section/para/control, 표 셀 안이면 cell)는 list_forms로 파악한다."
     )]
     pub fn get_form_value(
         &self,
         Parameters(p): Parameters<FormAtParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session(&p.doc_id, |session| {
-            session
-                .core
-                .get_form_value_native(p.section, p.para, p.control)
-                .map_err(hwp_err)
+            let f = form_at(
+                session.core.document(),
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                p.control,
+            )?;
+            Ok(form_value_json(f).to_string())
         })
     }
 
     #[tool(
-        description = "양식 개체의 상세 정보를 반환한다: 값/텍스트/캡션 + 크기·색·속성(properties), 콤보박스는 항목 목록 포함."
+        description = "양식 개체의 상세 정보를 반환한다: 값/텍스트/캡션 + 크기·색·속성(properties), 콤보박스는 항목 목록 포함. 표 셀 안의 콤보박스는 항목 목록을 읽을 수 없어 오류."
     )]
     pub fn get_form_info(
         &self,
         Parameters(p): Parameters<FormAtParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session(&p.doc_id, |session| {
-            session
-                .core
-                .get_form_object_info_native(p.section, p.para, p.control)
-                .map_err(hwp_err)
+            let f = form_at(
+                session.core.document(),
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                p.control,
+            )?;
+            if p.cell.is_none() {
+                return session
+                    .core
+                    .get_form_object_info_native(p.section, p.para, p.control)
+                    .map_err(hwp_err);
+            }
+            // 콤보박스 항목은 rhwp 가 문서 스크립트에서 private 함수로만 뽑는다
+            // (get_form_object_info_native 는 본문 좌표만 받는다).
+            if f.form_type == FormType::ComboBox {
+                return Err(ErrorData::invalid_params(
+                    "표 셀 안 콤보박스의 항목 목록은 rhwp가 노출하지 않는다 (값은 get_form_value)",
+                    None,
+                ));
+            }
+            let mut info = form_value_json(f);
+            let properties: std::collections::BTreeMap<_, _> = f.properties.iter().collect();
+            info.as_object_mut()
+                .expect("form_value_json 은 객체")
+                .extend([
+                    ("width".to_string(), json!(f.width)),
+                    ("height".to_string(), json!(f.height)),
+                    ("foreColor".to_string(), json!(f.fore_color)),
+                    ("backColor".to_string(), json!(f.back_color)),
+                    ("properties".to_string(), json!(properties)),
+                    ("items".to_string(), json!([])),
+                ]);
+            Ok(info.to_string())
         })
     }
 
     #[tool(
-        description = "양식 개체의 값을 설정한다. value(체크 상태 0/1), text(콤보 선택값·에디트 입력값), caption(버튼 라벨) 중 최소 하나를 지정한다. 본문 폼 대상. 위치는 list_forms로 파악한다."
+        description = "양식 개체의 값을 설정한다. value(체크 상태 0/1), text(콤보 선택값·에디트 입력값), caption(버튼 라벨) 중 최소 하나를 지정한다. 위치(section/para/control, 표 셀 안이면 cell)는 list_forms로 파악한다."
     )]
     pub fn set_form_value(
         &self,
@@ -2416,23 +2509,31 @@ impl HangulMcp {
         }
         let value_json = serde_json::Value::Object(obj).to_string();
         self.store.with_session_edit(&p.doc_id, |session| {
-            let result = session
-                .core
-                .set_form_value_native(p.section, p.para, p.control, &value_json)
-                .map_err(hwp_err)?;
-            // 네이티브는 폼이 아니어도 Ok({"ok":false})를 돌려준다 — 이때 Err로 바꿔
-            // 되돌리기 기록과 dirty가 잘못 남지 않게 한다 (with_session_edit는 Err면 편집 전으로 되돌린다).
-            if result.contains(r#""ok":true"#) {
-                Ok(result)
-            } else {
-                Err(ErrorData::invalid_params(
-                    format!(
-                        "({}, {}, {}) 위치에 양식 개체 없음",
-                        p.section, p.para, p.control
-                    ),
-                    None,
-                ))
+            // 네이티브는 폼이 아니어도 Ok({"ok":false})를 돌려주므로 위치를 먼저 확인한다.
+            form_at(
+                session.core.document(),
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                p.control,
+            )?;
+            match p.cell.as_ref() {
+                Some(c) => session.core.set_form_value_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    p.control,
+                    &value_json,
+                ),
+                None => {
+                    session
+                        .core
+                        .set_form_value_native(p.section, p.para, p.control, &value_json)
+                }
             }
+            .map_err(hwp_err)
         })
     }
 }

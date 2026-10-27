@@ -486,6 +486,7 @@ fn form_set_value_roundtrip() {
             value: None,
             text: Some("MCP에디트값".to_string()),
             caption: None,
+            cell: None,
         }))
         .expect("set_form_value (edit)");
     assert_eq!(
@@ -502,6 +503,7 @@ fn form_set_value_roundtrip() {
             value: Some(0), // 원본 CHECKED(1) → 해제(0)
             text: None,
             caption: None,
+            cell: None,
         }))
         .expect("set_form_value (checkbox)");
 
@@ -512,6 +514,7 @@ fn form_set_value_roundtrip() {
             section: e_sec,
             para: e_para,
             control: e_ctrl,
+            cell: None,
         }))
         .expect("get_form_value");
     let got: Value = serde_json::from_str(&got).unwrap();
@@ -531,6 +534,7 @@ fn form_set_value_roundtrip() {
             value: None,
             text: None,
             caption: None,
+            cell: None,
         }))
         .expect_err("value/text/caption 모두 없으면 에러여야 함");
     assert!(err.message.contains("최소 하나"), "에러 메시지: {err:?}");
@@ -565,6 +569,7 @@ fn form_set_value_roundtrip() {
             section: e2_sec,
             para: e2_para,
             control: e2_ctrl,
+            cell: None,
         }))
         .expect("재오픈 get_form_value (edit)");
     let got2: Value = serde_json::from_str(&got2).unwrap();
@@ -581,6 +586,7 @@ fn form_set_value_roundtrip() {
             section: c2_sec,
             para: c2_para,
             control: c2_ctrl,
+            cell: None,
         }))
         .expect("재오픈 get_form_value (checkbox)");
     let got_cb: Value = serde_json::from_str(&got_cb).unwrap();
@@ -3242,6 +3248,142 @@ fn set_page_setup_rejects_invalid_input() {
         }))
         .is_err());
     assert_eq!(page_setup(&server, &doc_id), before);
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 설정이 되돌리기 기록을 남김"
+    );
+}
+
+fn list_forms(server: &HangulMcp, doc_id: &str) -> Vec<Value> {
+    let v: Value = serde_json::from_str(
+        &server
+            .list_forms(Parameters(DocIdParams {
+                doc_id: doc_id.to_string(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    v["forms"].as_array().unwrap().clone()
+}
+
+fn cell_target_of(entry: &Value) -> CellTarget {
+    let c = &entry["cell"];
+    CellTarget {
+        control: c["control"].as_u64().unwrap() as usize,
+        cell: c["cell"].as_u64().unwrap() as usize,
+        cell_para: Some(c["cell_para"].as_u64().unwrap() as usize),
+    }
+}
+
+fn form_at_params(doc_id: &str, entry: &Value, cell: Option<CellTarget>) -> FormAtParams {
+    FormAtParams {
+        doc_id: doc_id.to_string(),
+        section: entry["section"].as_u64().unwrap() as usize,
+        para: entry["para"].as_u64().unwrap() as usize,
+        control: entry["control"].as_u64().unwrap() as usize,
+        cell,
+    }
+}
+
+/// 재파싱한 문서에서 list_forms 항목 위치의 셀 양식 값.
+fn cell_form_value(doc: &rhwp::model::document::Document, entry: &Value) -> i32 {
+    let c = cell_target_of(entry);
+    let para = &doc.sections[entry["section"].as_u64().unwrap() as usize].paragraphs
+        [entry["para"].as_u64().unwrap() as usize];
+    let rhwp::model::control::Control::Table(t) = &para.controls[c.control] else {
+        panic!("표가 아님");
+    };
+    match &t.cells[c.cell].paragraphs[c.cell_para()].controls
+        [entry["control"].as_u64().unwrap() as usize]
+    {
+        rhwp::model::control::Control::Form(f) => f.value,
+        _ => panic!("양식이 아님"),
+    }
+}
+
+/// 표 셀 안 체크박스: list_forms 가 cell 좌표로 알리고, get_form_value/get_form_info 가
+/// 읽고, set_form_value 로 바꾼 값이 HWPX/HWP 저장 뒤에도 남는다.
+#[test]
+fn form_in_table_cell_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("form_in_cells.hwpx"));
+    let forms = list_forms(&server, &doc_id);
+    let in_cells: Vec<_> = forms.iter().filter(|f| !f["cell"].is_null()).collect();
+    assert!(!in_cells.is_empty(), "셀 안 양식이 목록에 없음");
+    let entry = in_cells[0].clone();
+    assert_eq!(entry["formType"], "CheckBox", "{entry}");
+    let cell = || Some(cell_target_of(&entry));
+
+    let value: Value = serde_json::from_str(
+        &server
+            .get_form_value(Parameters(form_at_params(&doc_id, &entry, cell())))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["value"], entry["value"], "{value}");
+    let info: Value = serde_json::from_str(
+        &server
+            .get_form_info(Parameters(form_at_params(&doc_id, &entry, cell())))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(info["width"].as_u64().unwrap() > 0, "{info}");
+
+    let new_value = 1 - entry["value"].as_i64().unwrap() as i32;
+    let at = form_at_params(&doc_id, &entry, cell());
+    server
+        .set_form_value(Parameters(SetFormValueParams {
+            doc_id: doc_id.clone(),
+            section: at.section,
+            para: at.para,
+            control: at.control,
+            cell: cell(),
+            value: Some(new_value),
+            text: None,
+            caption: None,
+        }))
+        .expect("set_form_value in cell");
+    assert_eq!(
+        list_forms(&server, &doc_id)
+            .iter()
+            .find(|f| f["cell"] == entry["cell"] && f["control"] == entry["control"])
+            .unwrap()["value"],
+        new_value
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "form_in_cell") {
+        assert_eq!(cell_form_value(&doc, &entry), new_value, "{ext}");
+    }
+}
+
+/// 셀 좌표 없이 셀 양식 위치를 주거나, 양식이 아닌 컨트롤을 가리키면 오류이고 기록을 남기지 않는다.
+#[test]
+fn form_in_table_cell_rejects_wrong_target() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("form_in_cells.hwpx"));
+    let entry = list_forms(&server, &doc_id)
+        .into_iter()
+        .find(|f| !f["cell"].is_null())
+        .unwrap();
+    let mut wrong_cell = cell_target_of(&entry);
+    wrong_cell.cell_para = Some(999);
+    for cell in [None, Some(wrong_cell)] {
+        let at = form_at_params(&doc_id, &entry, None);
+        let desc = format!("{:?}", cell.as_ref().map(|c| c.cell_para));
+        let r = server.set_form_value(Parameters(SetFormValueParams {
+            doc_id: doc_id.clone(),
+            section: at.section,
+            para: at.para,
+            control: at.control,
+            cell,
+            value: Some(1),
+            text: None,
+            caption: None,
+        }));
+        assert!(r.is_err(), "{desc}: {r:?}");
+    }
+    assert!(server
+        .get_form_value(Parameters(form_at_params(&doc_id, &entry, None)))
+        .is_err());
     assert!(
         undo(&server, &doc_id).is_err(),
         "실패한 설정이 되돌리기 기록을 남김"

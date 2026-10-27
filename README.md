@@ -164,10 +164,10 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 
 | Tool | Description |
 |------|-------------|
-| `list_forms(doc_id)` | Body-level form objects (position `section/para/control`, kind, name, value, caption, text) |
-| `get_form_value(doc_id, section, para, control)` | Read a form object's value (kind, value, text, caption, enabled) |
-| `get_form_info(doc_id, section, para, control)` | Details: size, colors, attributes, combo box items |
-| `set_form_value(doc_id, section, para, control, value?, text?, caption?)` | Set a value (at least one of the three) |
+| `list_forms(doc_id)` | Every form object, including those in table cells (position `section/para/control`, plus `cell = {control, cell, cell_para}` inside a cell; kind, name, value, caption, text) |
+| `get_form_value(doc_id, section, para, control, cell?)` | Read a form object's value (kind, value, text, caption, enabled) |
+| `get_form_info(doc_id, section, para, control, cell?)` | Details: size, colors, attributes, combo box items (not available for a combo box inside a cell) |
+| `set_form_value(doc_id, section, para, control, cell?, value?, text?, caption?)` | Set a value (at least one of the three) |
 
 ## Known limitations
 
@@ -175,10 +175,9 @@ with `para` the paragraph holding the table (the same form the formatting tools 
   Form objects are preserved on save only if the rev pinned in `Cargo.toml` includes that
   writer. Building against an rhwp version without it silently drops form objects when a
   document containing them is saved.
-- **Form objects inside table cells are not exposed yet.** `list_forms`, `get_form_*`, and
-  `set_form_value` only handle form objects at the body paragraph level. rhwp has a native
-  API for setting form objects inside cells (reading is asymmetric — no native getter), but
-  no tool surfaces it today. See the roadmap.
+- **Combo box items inside table cells cannot be read.** rhwp extracts combo box items from
+  the document script only for body-level form objects, so `get_form_info` rejects a combo box
+  inside a cell. Its value is still readable and settable with `get_form_value`/`set_form_value`.
 - Fields (`ClickHere`) and form objects both save and round-trip correctly.
 
 ## Testing
