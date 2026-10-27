@@ -222,6 +222,8 @@ trip against the fixtures in `tests/fixtures/` (copied from rhwp's samples; `equ
 rhwp's `issue7593/repro-equation-issue7593.hwpx` with a second equation (`z^2`) appended to the
 first cell paragraph that holds one). `biz_plan.hwp` is a Hancom-written HWP 5.0 source, so the
 `.hwp` reader is exercised on a real file and not only on files rhwp wrote itself.
+`cell_bookmark.hwpx` is rhwp's `issue6284/child_policy_top_caption_charts.hwpx`, whose bookmarks
+all sit in table cells.
 
 ## Out of scope (possible follow-ups)
 

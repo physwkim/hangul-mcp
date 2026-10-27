@@ -4201,6 +4201,27 @@ fn delete_bookmark(
     }))
 }
 
+/// 표 셀 안 책갈피(한컴 작성 cell_bookmark.hwpx)는 목록에 cell 로 나오고, 이름 변경·삭제는
+/// 문서를 건드리지 않고 거부된다 — rhwp 책갈피 native 가 본문 문단만 다룬다.
+#[test]
+fn cell_bookmark_is_listed_but_not_editable() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("cell_bookmark.hwpx"));
+    let before = list_bookmarks(&server, &doc_id);
+    let in_cell = before
+        .iter()
+        .find(|b| b.get("cell").is_some())
+        .expect("픽스처에 셀 안 책갈피 없음");
+    let name = in_cell["name"].as_str().unwrap();
+    for err in [
+        rename_bookmark(&server, &doc_id, name, "새이름").unwrap_err(),
+        delete_bookmark(&server, &doc_id, name).unwrap_err(),
+    ] {
+        assert!(err.message.contains("안에 있어"), "{}", err.message);
+    }
+    assert_eq!(list_bookmarks(&server, &doc_id), before);
+}
+
 fn bookmark_names(doc: &rhwp::model::document::Document) -> Vec<String> {
     doc.sections[0]
         .paragraphs
