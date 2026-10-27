@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use crate::cell_format::CellFormat;
 use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
 use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
+use crate::placement::TableFormat;
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
@@ -650,6 +651,20 @@ pub struct MergeTableCellsParams {
     pub end_row: u16,
     /// 병합 끝 열 (포함)
     pub end_col: u16,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyTableFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표가 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스
+    pub control: usize,
+    /// 적용할 표 서식 (get_table_format 결과와 같은 모양, 지정한 항목만 바뀐다)
+    pub format: TableFormat,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1864,6 +1879,38 @@ impl HangulMcp {
                     p.section, p.para, offset, p.rows, p.cols, &options,
                 )
                 .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "표 서식을 반환한다: 배치(inline 글자처럼 취급, text_wrap, horz/vert_rel_to·align·offset_mm, 바깥 margin_*_mm), cell_padding_*_mm(셀 기본 안 여백), cell_spacing_mm, repeat_header. 결과는 apply_table_format의 format 입력과 같은 모양."
+    )]
+    pub fn get_table_format(
+        &self,
+        Parameters(p): Parameters<GetTableParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let table = table_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(TableFormat::from_table(table)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "표 서식을 바꾼다: inline(글자처럼 취급), text_wrap(square/top_and_bottom/behind_text/in_front_of_text), horz_rel_to(paper/page/column/para)·horz_align(left/center/right/inside/outside)·horz_offset_mm, vert_rel_to(paper/page/para)·vert_align(top/center/bottom/inside/outside)·vert_offset_mm, margin_*_mm(바깥 여백), cell_padding_*_mm, cell_spacing_mm, repeat_header. 지정한 항목만 바뀐다."
+    )]
+    pub fn apply_table_format(
+        &self,
+        Parameters(p): Parameters<ApplyTableFormatParams>,
+    ) -> Result<String, ErrorData> {
+        let props = p.format.to_rhwp_json()?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            table_at(session.core.document(), p.section, p.para, p.control)?;
+            session
+                .core
+                .set_table_properties_native(p.section, p.para, p.control, &props)
+                .map_err(hwp_err)?;
+            let table = table_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(TableFormat::from_table(table)).to_string())
         })
     }
 

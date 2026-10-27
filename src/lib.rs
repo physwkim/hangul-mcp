@@ -3,5 +3,6 @@
 pub mod cell_format;
 pub mod format;
 pub mod page;
+pub mod placement;
 pub mod server;
 pub mod store;

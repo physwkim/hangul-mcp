@@ -9,17 +9,21 @@ use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::page::{Binding, Orientation, PageSetup};
+use hangul_mcp::placement::{
+    HorzAlign, HorzRelTo, Placement, TableFormat, TextWrap as PlacementWrap, VertRelTo,
+};
 use hangul_mcp::server::{
     ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams,
-    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, FieldByNameParams,
-    FitTableToPageParams, FormAtParams, GetCellFormatParams, GetCharFormatParams, GetTableParams,
-    GetTextParams, HangulMcp, HeaderFooterKind, HeaderFooterPages, HeaderFooterParams,
-    InsertBreakParams, InsertNoteParams, InsertPictureParams, InsertTableColumnParams,
-    InsertTableRowParams, InsertTextParams, MergeParagraphParams, MergeTableCellsParams, NoteKind,
-    ObjectAtParams, OpenDocumentParams, ParaParams, ParaTargetParams, RenderPageParams,
-    ReplaceTextParams, SaveDocumentParams, SectionParams, SetCellTextParams, SetFieldValueParams,
-    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams,
-    SplitTableCellParams, StyleRef,
+    ApplyTableFormatParams, BreakKind, CreateTableParams, DeleteTextParams, DocIdParams,
+    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
+    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
+    HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
+    InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
+    MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
+    ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
+    SectionParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
+    SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams, SplitTableCellParams,
+    StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -3597,6 +3601,191 @@ fn apply_cell_format_rejects_invalid_input() {
     )
     .is_err());
     // create_table 한 단계만 남아 있어야 한다.
+    undo(&server, &doc_id).expect("undo create_table");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 서식이 되돌리기 기록을 남김"
+    );
+}
+
+fn get_table_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+) -> TableFormat {
+    serde_json::from_str(
+        &server
+            .get_table_format(Parameters(GetTableParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn apply_table_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    format: TableFormat,
+) -> Result<String, rmcp::ErrorData> {
+    server.apply_table_format(Parameters(ApplyTableFormatParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+        format,
+    }))
+}
+
+/// 배치·바깥 여백·셀 기본 안 여백·제목 줄 반복이 조회와 HWPX/HWP 저장 뒤에 같은 값으로 남는다.
+#[test]
+fn table_format_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 2, 2);
+    let before = get_table_format(&server, &doc_id, table);
+    let change = TableFormat {
+        placement: Placement {
+            inline: Some(false),
+            text_wrap: Some(PlacementWrap::TopAndBottom),
+            horz_rel_to: Some(HorzRelTo::Page),
+            horz_align: Some(HorzAlign::Center),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(3.0),
+            margin_top_mm: Some(2.0),
+            ..Default::default()
+        },
+        cell_padding_left_mm: Some(4.0),
+        repeat_header: Some(true),
+        ..Default::default()
+    };
+    let expected = TableFormat {
+        placement: Placement {
+            inline: Some(false),
+            text_wrap: Some(PlacementWrap::TopAndBottom),
+            horz_rel_to: Some(HorzRelTo::Page),
+            horz_align: Some(HorzAlign::Center),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(3.0),
+            margin_top_mm: Some(2.0),
+            ..before.placement.clone()
+        },
+        cell_padding_left_mm: Some(4.0),
+        repeat_header: Some(true),
+        ..before.clone()
+    };
+    let out: TableFormat =
+        serde_json::from_str(&apply_table_format(&server, &doc_id, table, change).unwrap())
+            .unwrap();
+    assert_eq!(out, expected);
+    assert_eq!(get_table_format(&server, &doc_id, table), expected);
+    for (ext, doc) in save_both(&server, &doc_id, "table_format") {
+        assert_eq!(
+            TableFormat::from_table(table_at(&doc, table.0, table.1)),
+            expected,
+            "{ext}"
+        );
+    }
+}
+
+/// 셀 기본 안 여백을 바꾸면 자기 여백이 없는 셀의 get_cell_format 이 그 값을 보이고,
+/// 그 셀에 한 변만 자기 여백을 주면 나머지 변은 보이던 값(표 기본)을 그대로 쓴다.
+#[test]
+fn cell_padding_follows_table_default_until_set() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 1, 2);
+    apply_table_format(
+        &server,
+        &doc_id,
+        table,
+        TableFormat {
+            cell_padding_left_mm: Some(4.0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_cell_format(&server, &doc_id, table, 0, 0).padding_left_mm,
+        Some(4.0)
+    );
+    apply_cell_format(
+        &server,
+        &doc_id,
+        table,
+        (0, 0, None, None),
+        CellFormat {
+            padding_top_mm: Some(1.0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let f = get_cell_format(&server, &doc_id, table, 0, 0);
+    assert_eq!(
+        (f.padding_left_mm, f.padding_top_mm),
+        (Some(4.0), Some(1.0))
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "cell_padding_default") {
+        let t = table_at(&doc, table.0, table.1);
+        let cell = t.cells.iter().find(|c| c.row == 0 && c.col == 0).unwrap();
+        assert_eq!(CellFormat::from_cell(&doc, t, cell), f, "{ext}");
+    }
+}
+
+#[test]
+fn apply_table_format_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 2, 2);
+    let bad = [
+        TableFormat::default(),
+        TableFormat {
+            placement: Placement {
+                text_wrap: Some(PlacementWrap::Tight),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        TableFormat {
+            placement: Placement {
+                margin_left_mm: Some(-1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        TableFormat {
+            placement: Placement {
+                horz_offset_mm: Some(5000.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        TableFormat {
+            cell_spacing_mm: Some(500.0),
+            ..Default::default()
+        },
+    ];
+    for f in bad {
+        let desc = format!("{f:?}");
+        assert!(
+            apply_table_format(&server, &doc_id, table, f).is_err(),
+            "{desc}"
+        );
+    }
+    assert!(apply_table_format(
+        &server,
+        &doc_id,
+        (table.0, table.1 + 9),
+        TableFormat {
+            repeat_header: Some(true),
+            ..Default::default()
+        }
+    )
+    .is_err());
     undo(&server, &doc_id).expect("undo create_table");
     assert!(
         undo(&server, &doc_id).is_err(),
