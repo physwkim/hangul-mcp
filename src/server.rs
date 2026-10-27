@@ -219,6 +219,30 @@ pub struct DeleteTextParams {
     pub count: usize,
 }
 
+/// 나누기 종류.
+#[derive(Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakKind {
+    /// 쪽 나누기 (Ctrl+Enter)
+    Page,
+    /// 단 나누기 (Ctrl+Shift+Enter). 1단 문서에서는 쪽 나누기처럼 동작한다
+    Column,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertBreakParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 문단 인덱스
+    pub para: usize,
+    /// 나눌 위치 (char 단위). 이 위치 뒤 글자가 새 쪽(단)의 첫 문단이 된다
+    pub char_offset: usize,
+    /// 나누기 종류 (기본 page)
+    pub kind: Option<BreakKind>,
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ParaParams {
     /// 문서 핸들
@@ -963,6 +987,27 @@ impl HangulMcp {
                 .core
                 .split_paragraph_native(p.section, p.para, offset, None)
                 .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "문단을 char_offset에서 나누고 뒤 문단을 새 쪽(kind=page, 기본) 또는 새 단(kind=column)에서 시작하게 한다. 반환값의 paraIdx가 새 문단이다."
+    )]
+    pub fn insert_break(
+        &self,
+        Parameters(p): Parameters<InsertBreakParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
+            match p.kind.unwrap_or(BreakKind::Page) {
+                BreakKind::Page => session
+                    .core
+                    .insert_page_break_native(p.section, p.para, offset),
+                BreakKind::Column => session
+                    .core
+                    .insert_column_break_native(p.section, p.para, offset),
+            }
+            .map_err(hwp_err)
         })
     }
 

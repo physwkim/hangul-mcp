@@ -8,13 +8,13 @@ use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::server::{
-    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, CreateTableParams,
+    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, BreakKind, CreateTableParams,
     DeleteTextParams, DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
-    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, InsertPictureParams,
-    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, MergeTableCellsParams,
-    OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams, SaveDocumentParams,
-    SetCellTextParams, SetFieldValueParams, SetFormValueParams, SplitParagraphParams,
-    SplitTableCellParams, StyleRef,
+    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, InsertBreakParams,
+    InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
+    MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams,
+    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
+    SplitParagraphParams, SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -2086,5 +2086,75 @@ fn create_table_offset_counts_text_chars_after_inline_object() {
         assert_eq!(texts, ["안녕 ", "", "", "Hello 123"], "{ext}");
         assert_eq!(table_para, 1, "{ext} 표 문단 위치");
         table_at(&doc, table_para, 0);
+    }
+}
+
+fn insert_break(
+    server: &HangulMcp,
+    doc_id: &str,
+    char_offset: usize,
+    kind: Option<BreakKind>,
+) -> Result<String, rmcp::ErrorData> {
+    server.insert_break(Parameters(InsertBreakParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para: 0,
+        char_offset,
+        kind,
+    }))
+}
+
+/// 쪽 나누기 뒤 문단은 Page 나누기 종류를 갖고 저장본을 다시 열면 쪽이 하나 늘어야 한다.
+#[test]
+fn insert_page_break_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, info) = open(&server, &fixture("ref_text.hwpx"));
+    let pages_before = info["page_count"].as_u64().unwrap();
+    insert_break(&server, &doc_id, 3, None).expect("insert_break");
+    for (ext, doc) in save_both(&server, &doc_id, "page_break") {
+        assert_eq!(para_texts(&doc), ["안녕 ", "Hello 123"], "{ext}");
+        assert_eq!(
+            doc.sections[0].paragraphs[1].column_type,
+            rhwp::model::paragraph::ColumnBreakType::Page,
+            "{ext} 나누기 종류"
+        );
+        let (_, reopened) = open(&server, &temp_out(&format!("page_break.{ext}")));
+        assert_eq!(
+            reopened["page_count"].as_u64().unwrap(),
+            pages_before + 1,
+            "{ext} 쪽 수"
+        );
+    }
+}
+
+#[test]
+fn insert_column_break_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_break(&server, &doc_id, 3, Some(BreakKind::Column)).expect("insert_break");
+    for (ext, doc) in save_both(&server, &doc_id, "column_break") {
+        assert_eq!(para_texts(&doc), ["안녕 ", "Hello 123"], "{ext}");
+        assert_eq!(
+            doc.sections[0].paragraphs[1].column_type,
+            rhwp::model::paragraph::ColumnBreakType::Column,
+            "{ext} 나누기 종류"
+        );
+    }
+}
+
+/// 쪽 나누기도 split 계열이라 인라인 개체 뒤 char_offset 을 글자 위치로 받고,
+/// 문단 길이를 넘는 위치는 거부해야 한다.
+#[test]
+fn insert_break_offset_is_text_chars_and_bounded() {
+    let server = HangulMcp::new();
+    let doc_id = doc_with_leading_inline_picture(&server, "break_after_pic.png");
+    assert!(
+        insert_break(&server, &doc_id, 13, None).is_err(),
+        "문단 길이(12)+1 은 거부돼야 함"
+    );
+    insert_break(&server, &doc_id, 3, None).expect("insert_break");
+    for (ext, doc) in save_both(&server, &doc_id, "break_after_pic") {
+        assert_eq!(para_texts(&doc), ["안녕 ", "Hello 123"], "{ext}");
+        assert_eq!(paras_with_picture(&doc), [0], "{ext}");
     }
 }

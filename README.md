@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (40)
+## Tools (41)
 
 **Session**
 
@@ -89,6 +89,7 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `delete_paragraph(doc_id, section, para)` | Delete a paragraph |
 | `split_paragraph(doc_id, section, para, char_offset)` | Split a paragraph |
 | `merge_paragraph(doc_id, section, para)` | Merge with the previous paragraph |
+| `insert_break(doc_id, section, para, char_offset, kind?)` | Split the paragraph and start the rest on a new page (`kind="page"`, default) or column (`"column"`) |
 
 **Formatting**
 
