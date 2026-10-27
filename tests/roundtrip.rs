@@ -1979,3 +1979,112 @@ fn body_offset_tools_reject_past_paragraph_end() {
             .unwrap_or_else(|e| panic!("{label}: 길이 위치는 받아야 함: {e:?}"));
     }
 }
+
+/// 문단 0 맨 앞(글자 위치 0)에 글자처럼 취급한 그림을 넣은 세션.
+/// 문단 텍스트는 "안녕 Hello 123" 그대로다.
+fn doc_with_leading_inline_picture(server: &HangulMcp, name: &str) -> String {
+    let (doc_id, _) = open(server, &fixture("ref_text.hwpx"));
+    let (png_path, _) = sample_png(name);
+    server
+        .insert_picture(Parameters(picture_params(&doc_id, &png_path)))
+        .expect("insert_picture");
+    doc_id
+}
+
+fn para_texts(doc: &rhwp::model::document::Document) -> Vec<&str> {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect()
+}
+
+fn paras_with_picture(doc: &rhwp::model::document::Document) -> Vec<usize> {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| {
+            p.controls
+                .iter()
+                .any(|c| matches!(c, rhwp::model::control::Control::Picture(_)))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// char_offset 은 글자 위치다: 앞에 인라인 그림이 있어도 split_paragraph(3) 은
+/// insert_text(3) 과 같은 자리("안녕 " 뒤)에서 나눠야 한다. rhwp split 은 개체를
+/// 한 칸 더 센 논리 위치를 받으므로 변환 없이 넘기면 "안녕" | " Hello 123" 이 된다.
+#[test]
+fn split_paragraph_offset_counts_text_chars_after_inline_object() {
+    let server = HangulMcp::new();
+    let doc_id = doc_with_leading_inline_picture(&server, "split_after_pic.png");
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 3,
+        }))
+        .expect("split_paragraph");
+    for (ext, doc) in save_both(&server, &doc_id, "split_after_pic") {
+        assert_eq!(para_texts(&doc), ["안녕 ", "Hello 123"], "{ext}");
+        assert_eq!(
+            paras_with_picture(&doc),
+            [0],
+            "{ext} 그림은 앞 문단에 남아야 함"
+        );
+    }
+}
+
+/// 같은 글자 위치(0)의 개체는 분할 뒤쪽으로 간다 — insert_text 가 개체 앞에 넣는 것과 같은 규칙.
+#[test]
+fn split_paragraph_at_object_position_moves_object_to_second_paragraph() {
+    let server = HangulMcp::new();
+    let doc_id = doc_with_leading_inline_picture(&server, "split_at_pic.png");
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+        }))
+        .expect("split_paragraph");
+    for (ext, doc) in save_both(&server, &doc_id, "split_at_pic") {
+        assert_eq!(para_texts(&doc), ["", "안녕 Hello 123"], "{ext}");
+        assert_eq!(
+            paras_with_picture(&doc),
+            [1],
+            "{ext} 그림은 뒤 문단으로 가야 함"
+        );
+    }
+}
+
+#[test]
+fn create_table_offset_counts_text_chars_after_inline_object() {
+    let server = HangulMcp::new();
+    let doc_id = doc_with_leading_inline_picture(&server, "table_after_pic.png");
+    let out = server
+        .create_table(Parameters(CreateTableParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 3,
+            rows: 1,
+            cols: 1,
+            column_widths_percent: None,
+            column_widths: None,
+            repeat_header: None,
+        }))
+        .expect("create_table");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let table_para = v["paraIdx"].as_u64().unwrap() as usize;
+    for (ext, doc) in save_both(&server, &doc_id, "table_after_pic") {
+        let texts = para_texts(&doc);
+        // rhwp 는 [앞 글자 | 표 문단 | 빈 이웃 문단 | 뒤 글자] 순서로 넣는다.
+        assert_eq!(texts, ["안녕 ", "", "", "Hello 123"], "{ext}");
+        assert_eq!(table_para, 1, "{ext} 표 문단 위치");
+        table_at(&doc, table_para, 0);
+    }
+}

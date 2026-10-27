@@ -75,6 +75,34 @@ fn check_body_offset(
     Ok(())
 }
 
+/// 글자 단위 위치를 rhwp 문단 분할 API(split/쪽·단 나누기/표 삽입)의 논리 위치로 바꾼다.
+///
+/// 서버 도구의 char_offset 은 문단 텍스트의 글자 위치다(get_text·insert_text 와 같은 자).
+/// 반면 `Paragraph::split_at` 은 글자처럼 취급한 개체·각주 등을 한 칸씩 더 센 논리 위치를
+/// 받으므로, 앞에 인라인 개체가 있으면 그대로 넘긴 위치가 개체 수만큼 앞당겨진다.
+/// 같은 글자 위치에 놓인 개체는 분할 뒤쪽 문단으로 간다(insert_text 가 개체 앞에 넣는 것과 같다).
+fn body_split_offset(
+    core: &DocumentCore,
+    section: usize,
+    para: usize,
+    char_offset: usize,
+) -> Result<usize, ErrorData> {
+    check_body_offset(core, section, para, "char_offset", char_offset)?;
+    let para = &core.document().sections[section].paragraphs[para];
+    // `split_at` 이 한 칸씩 세는 컨트롤(`Paragraph::occupies_split_slot`)과 같은 집합이다.
+    // 칸 컨트롤은 텍스트 위치 순서이므로, 글자 위치 char_offset 앞의 칸 m 개만 더하면
+    // split_at 의 `논리 위치 − 앞선 칸 수` 가 정확히 char_offset 으로 돌아온다.
+    let slots_before = para
+        .controls
+        .iter()
+        .zip(para.control_text_positions())
+        .filter(|(c, pos)| {
+            (c.is_logical_inline() || matches!(c, Control::CharOverlap(_))) && *pos < char_offset
+        })
+        .count();
+    Ok(char_offset + slots_before)
+}
+
 fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
@@ -930,16 +958,10 @@ impl HangulMcp {
         Parameters(p): Parameters<SplitParagraphParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
-            check_body_offset(
-                &session.core,
-                p.section,
-                p.para,
-                "char_offset",
-                p.char_offset,
-            )?;
+            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
             session
                 .core
-                .split_paragraph_native(p.section, p.para, p.char_offset, None)
+                .split_paragraph_native(p.section, p.para, offset, None)
                 .map_err(hwp_err)
         })
     }
@@ -1196,22 +1218,11 @@ impl HangulMcp {
             repeat_header: p.repeat_header,
         };
         self.store.with_session_edit(&p.doc_id, |session| {
-            check_body_offset(
-                &session.core,
-                p.section,
-                p.para,
-                "char_offset",
-                p.char_offset,
-            )?;
+            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
             session
                 .core
                 .create_table_with_options_native(
-                    p.section,
-                    p.para,
-                    p.char_offset,
-                    p.rows,
-                    p.cols,
-                    &options,
+                    p.section, p.para, offset, p.rows, p.cols, &options,
                 )
                 .map_err(hwp_err)
         })
