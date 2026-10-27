@@ -15,6 +15,7 @@ use rhwp::model::style::{
     Alignment as RAlignment, CharShape, LineSpacingType as RLineSpacingType, ParaShape,
     UnderlineType as RUnderlineType,
 };
+use rhwp::DocumentCore;
 use rmcp::ErrorData;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -315,9 +316,10 @@ impl CharFormat {
         Ok(())
     }
 
-    /// rhwp `apply_char_format*_native` 가 받는 속성 JSON. `font_id` 는 `font_name` 을
-    /// 문서에 등록해 얻은 ID 다.
-    pub fn to_rhwp_props(&self, font_id: Option<u16>) -> Result<String, ErrorData> {
+    /// rhwp `apply_char_format*_native` 가 받는 속성 JSON. `font_ids` 는 `font_name` 을
+    /// 언어별 글꼴 목록에 등록해 얻은 7칸 ID 다 — 목록이 언어마다 따로라 같은 이름도
+    /// 언어마다 ID 가 다를 수 있으므로, 한 ID 를 7칸에 복사하는 `fontId` 는 쓰지 않는다.
+    pub fn to_rhwp_props(&self, font_ids: Option<[u16; 7]>) -> Result<String, ErrorData> {
         let mut p = Props::new();
         p.put("bold", self.bold);
         p.put("italic", self.italic);
@@ -340,7 +342,7 @@ impl CharFormat {
             self.font_size_pt
                 .map(|pt| (pt * CHAR_SIZE_UNITS_PER_PT).round() as i32),
         );
-        p.put("fontId", font_id);
+        p.put("fontIds", font_ids);
         p.put("textColor", self.text_color.as_deref());
         p.put("shadeColor", self.shade_color.as_deref());
         p.put("outlineType", self.outline_type);
@@ -418,6 +420,43 @@ impl CharFormat {
         };
         (format, per_language)
     }
+}
+
+/// 글꼴 이름의 언어별 ID 7칸. 없는 언어 목록에는 등록한다.
+///
+/// 글꼴 목록은 언어마다 따로이고 길이도 다를 수 있어, 한 언어의 인덱스를 다른 언어에
+/// 그대로 쓰면 엉뚱한 글꼴을 가리킨다. 어디에도 없으면 rhwp 가 7개 목록 끝에 한꺼번에
+/// 붙이므로 각 목록의 원래 길이가 그 언어의 새 ID 다.
+pub fn font_ids_for(core: &mut DocumentCore, name: &str) -> Result<[u16; 7], ErrorData> {
+    let faces = &core.document().doc_info.font_faces;
+    let found: [Option<u16>; 7] = std::array::from_fn(|lang| {
+        faces
+            .get(lang)?
+            .iter()
+            .position(|f| f.name == name)
+            .map(|i| i as u16)
+    });
+    let lens: [usize; 7] = std::array::from_fn(|lang| faces.get(lang).map_or(0, Vec::len));
+    if found.iter().all(Option::is_none) {
+        core.find_or_create_font_id_native(name);
+        return Ok(lens.map(|l| l as u16));
+    }
+    let mut ids = [0u16; 7];
+    for lang in 0..7 {
+        ids[lang] = match found[lang] {
+            Some(id) => id,
+            None => {
+                let id = core.find_or_create_font_id_for_lang(lang, name);
+                u16::try_from(id).map_err(|_| {
+                    ErrorData::internal_error(
+                        format!("글꼴 {name:?} 을 언어 {lang} 목록에 등록하지 못했다"),
+                        None,
+                    )
+                })?
+            }
+        };
+    }
+    Ok(ids)
 }
 
 /// 문단의 [start, end) 를 글자 모양이 같은 구간들로 나눈다 → (start, end, char_shape_id).

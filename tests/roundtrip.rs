@@ -854,8 +854,13 @@ fn apply_char_format_body_roundtrip() {
             assert_eq!(cs.text_color, RED_BGR, "{label}: [{i}] 색");
             assert!(cs.bold, "{label}: [{i}] 진하게");
             assert_eq!(cs.base_size, 1400, "{label}: [{i}] 크기");
-            let font = &doc.doc_info.font_faces[0][cs.font_ids[0] as usize];
-            assert_eq!(font.name, "hangul-mcp 테스트 글꼴", "{label}: [{i}] 글꼴");
+            for lang in 0..7 {
+                let font = &doc.doc_info.font_faces[lang][cs.font_ids[lang] as usize];
+                assert_eq!(
+                    font.name, "hangul-mcp 테스트 글꼴",
+                    "{label}: [{i}] 언어 {lang} 글꼴"
+                );
+            }
         }
         let after = char_shape_at(doc, para, 4);
         assert_ne!(after.text_color, RED_BGR, "{label}: 범위 밖 글자까지 빨강");
@@ -1261,4 +1266,51 @@ fn apply_para_format_rejects_invalid_input() {
     }
     let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
     assert_eq!(docs[0]["dirty"].as_bool(), Some(false), "{docs}");
+}
+
+/// 글꼴 목록은 언어마다 따로라 같은 이름도 언어마다 ID 가 다를 수 있다. 픽스처는
+/// LATIN 목록 앞에 다른 글꼴이 하나 더 있어 "함초롬바탕" 이 HANGUL 1번, LATIN 2번이다.
+/// 한 ID 를 7칸에 복사하면 LATIN 이 "함초롬돋움" 을 가리키게 된다.
+#[test]
+fn apply_char_format_font_name_uses_per_language_ids() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("font_lists_differ.hwpx"));
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            start: 0,
+            end: 1,
+            cell: None,
+            format: CharFormat {
+                font_name: Some("함초롬바탕".to_string()),
+                ..CharFormat::default()
+            },
+        }))
+        .expect("apply_char_format");
+
+    let out_path = temp_out("font_lists_differ.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(out_path.clone()),
+        }))
+        .expect("save_document");
+    let doc =
+        rhwp::parser::hwpx::parse_hwpx(&std::fs::read(&out_path).unwrap()).expect("저장본 재파싱");
+    assert_eq!(
+        doc.doc_info.font_faces[1][2].name, "함초롬바탕",
+        "픽스처 전제: LATIN 2번이 함초롬바탕"
+    );
+    let para = &doc.sections[0].paragraphs[0];
+    let cs = char_shape_at(&doc, para, 0);
+    for lang in 0..7 {
+        let name = &doc.doc_info.font_faces[lang][cs.font_ids[lang] as usize].name;
+        assert_eq!(
+            name, "함초롬바탕",
+            "언어 {lang} 글꼴 (ids {:?})",
+            cs.font_ids
+        );
+    }
 }

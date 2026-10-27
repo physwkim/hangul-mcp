@@ -825,12 +825,11 @@ impl HangulMcp {
                     None,
                 ));
             }
-            let font_id = p
-                .format
-                .font_name
-                .as_deref()
-                .map(|name| session.core.find_or_create_font_id_native(name) as u16);
-            let props = p.format.to_rhwp_props(font_id)?;
+            let font_ids = match p.format.font_name.as_deref() {
+                Some(name) => Some(crate::format::font_ids_for(&mut session.core, name)?),
+                None => None,
+            };
+            let props = p.format.to_rhwp_props(font_ids)?;
             match cell {
                 Some((control, cell, cp)) => session.core.apply_char_format_in_cell_native(
                     p.section, p.para, control, cell, cp, p.start, p.end, &props,
