@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rhwp::document_core::hyperlink::HyperlinkTarget;
 use rhwp::model::control::{Control, FormObject, FormType};
 use rhwp::model::document::Document;
 use rhwp::DocumentCore;
@@ -316,6 +317,136 @@ fn link_markdown_images(
     Ok(md)
 }
 
+/// 본문 문단, 또는 그 문단 속 표 셀 문단의 주소. `cell` 은 (표 컨트롤, 셀, 셀 문단).
+#[derive(Clone, Copy)]
+struct ParaLoc {
+    section: usize,
+    para: usize,
+    cell: Option<(usize, usize, usize)>,
+}
+
+impl ParaLoc {
+    fn of(section: usize, para: usize, cell: Option<&CellTarget>) -> Self {
+        Self {
+            section,
+            para,
+            cell: cell.map(|c| (c.control, c.cell, c.cell_para())),
+        }
+    }
+
+    /// `{section, para}` 에 셀 문단이면 `cell: {control, cell, cell_para}` 를 더한 위치 객체.
+    fn json(self) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("section".into(), json!(self.section));
+        m.insert("para".into(), json!(self.para));
+        if let Some((control, cell, cell_para)) = self.cell {
+            m.insert(
+                "cell".into(),
+                json!({"control": control, "cell": cell, "cell_para": cell_para}),
+            );
+        }
+        m
+    }
+
+    fn hyperlink_target(self) -> HyperlinkTarget {
+        HyperlinkTarget {
+            section: self.section,
+            para: self.para,
+            cell_path: self.cell.into_iter().collect(),
+        }
+    }
+}
+
+/// 문서 순서로 모든 본문 문단과 그 문단 속 표 셀 문단을 방문한다.
+fn for_each_para(doc: &Document, mut f: impl FnMut(ParaLoc, &rhwp::model::paragraph::Paragraph)) {
+    for (section, sec) in doc.sections.iter().enumerate() {
+        for (para, p) in sec.paragraphs.iter().enumerate() {
+            f(
+                ParaLoc {
+                    section,
+                    para,
+                    cell: None,
+                },
+                p,
+            );
+            for (ci, ctrl) in p.controls.iter().enumerate() {
+                if let Control::Table(t) = ctrl {
+                    for (cell_idx, cell) in t.cells.iter().enumerate() {
+                        for (cp, cell_para) in cell.paragraphs.iter().enumerate() {
+                            let cell = Some((ci, cell_idx, cp));
+                            f(
+                                ParaLoc {
+                                    section,
+                                    para,
+                                    cell,
+                                },
+                                cell_para,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 책갈피 이름: 비어 있지 않은 한 줄.
+fn check_bookmark_name(name: &str, field: &str) -> Result<(), ErrorData> {
+    if name.trim().is_empty() || name.chars().any(char::is_control) {
+        return Err(ErrorData::invalid_params(
+            format!("{field} 은(는) 비어 있지 않은 한 줄이어야 한다"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// rhwp 책갈피 native 는 거부를 `Ok({"ok":false,"error":..})` 로 돌려주므로 오류로 바꾼다.
+fn bookmark_result(out: String) -> Result<(), ErrorData> {
+    let v: Value = serde_json::from_str(&out).map_err(|e| {
+        ErrorData::internal_error(format!("책갈피 결과 해석 실패: {e}: {out}"), None)
+    })?;
+    if v["ok"] == json!(true) {
+        Ok(())
+    } else {
+        Err(ErrorData::invalid_params(
+            v["error"].as_str().unwrap_or(&out).to_string(),
+            None,
+        ))
+    }
+}
+
+/// 이름이 `name` 인 본문 문단 책갈피의 (section, para, control).
+/// rhwp 책갈피 삭제·이름 변경은 본문 문단만 다루므로 셀 안 책갈피는 거부한다.
+fn body_bookmark(doc: &Document, name: &str) -> Result<(usize, usize, usize), ErrorData> {
+    let mut found = None;
+    for_each_para(doc, |loc, p| {
+        for (ci, c) in p.controls.iter().enumerate() {
+            if matches!(c, Control::Bookmark(b) if b.name == name) && found.is_none() {
+                found = Some((loc, ci));
+            }
+        }
+    });
+    match found {
+        Some((
+            ParaLoc {
+                section,
+                para,
+                cell: None,
+            },
+            ci,
+        )) => Ok((section, para, ci)),
+        Some(_) => Err(ErrorData::invalid_params(
+            format!("책갈피 '{name}' 은 표 셀 안에 있어 바꿀 수 없다 (본문 책갈피만 지원)"),
+            None,
+        )),
+        None => Err(ErrorData::invalid_params(
+            format!("책갈피 '{name}' 이 없다"),
+            None,
+        )),
+    }
+}
+
 /// 본문 문단 (section, para) 의 컨트롤 control 인 표.
 fn table_at(
     doc: &Document,
@@ -443,6 +574,88 @@ pub struct ExportDocumentParams {
     pub page_start: Option<u32>,
     /// 끝 쪽 (0-기반, 포함). 생략하면 마지막 쪽
     pub page_end: Option<u32>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct AddBookmarkParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스
+    pub para: usize,
+    /// 문단 내 위치 (char 단위)
+    pub char_offset: usize,
+    /// 책갈피 이름 (문서 안에서 유일)
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct BookmarkNameParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 책갈피 이름
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct RenameBookmarkParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 지금 이름
+    pub name: String,
+    /// 새 이름 (문서 안에서 유일)
+    pub new_name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertHyperlinkParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
+    pub para: usize,
+    /// 표 셀 안 문단이면 그 셀
+    pub cell: Option<CellTarget>,
+    /// 링크를 걸 글자 범위 시작 (char 단위, 포함)
+    pub start: usize,
+    /// 링크를 걸 글자 범위 끝 (char 단위, 제외)
+    pub end: usize,
+    /// http:// 또는 https:// 절대 주소
+    pub url: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct HyperlinkAtParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
+    pub para: usize,
+    /// 표 셀 안 문단이면 그 셀
+    pub cell: Option<CellTarget>,
+    /// list_hyperlinks 의 field_id
+    pub field_id: u32,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct UpdateHyperlinkParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
+    pub para: usize,
+    /// 표 셀 안 문단이면 그 셀
+    pub cell: Option<CellTarget>,
+    /// list_hyperlinks 의 field_id
+    pub field_id: u32,
+    /// 새 주소 (http:// 또는 https://)
+    pub url: Option<String>,
+    /// 새 표시 글자 (한 줄)
+    pub text: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1344,6 +1557,204 @@ impl HangulMcp {
                 "images": images,
             })
             .to_string())
+        })
+    }
+
+    #[tool(
+        description = "문서의 책갈피를 문서 순서로 나열한다: name, section/para/control, char_offset (표 셀 안이면 cell)."
+    )]
+    pub fn list_bookmarks(
+        &self,
+        Parameters(p): Parameters<DocIdParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let mut out = Vec::new();
+            for_each_para(session.core.document(), |loc, para| {
+                for ((ci, c), at) in para
+                    .controls
+                    .iter()
+                    .enumerate()
+                    .zip(para.control_text_positions())
+                {
+                    if let Control::Bookmark(b) = c {
+                        let mut entry = loc.json();
+                        entry.insert("name".into(), json!(b.name));
+                        entry.insert("control".into(), json!(ci));
+                        entry.insert("char_offset".into(), json!(at));
+                        out.push(Value::Object(entry));
+                    }
+                }
+            });
+            Ok(json!({ "bookmarks": out }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "본문 문단의 char_offset 위치에 책갈피를 넣는다. 이름은 문서 안에서 유일해야 한다."
+    )]
+    pub fn add_bookmark(
+        &self,
+        Parameters(p): Parameters<AddBookmarkParams>,
+    ) -> Result<String, ErrorData> {
+        check_bookmark_name(&p.name, "name")?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            check_offset(
+                &session.core,
+                p.section,
+                p.para,
+                None,
+                "char_offset",
+                p.char_offset,
+            )?;
+            bookmark_result(
+                session
+                    .core
+                    .add_bookmark_native(p.section, p.para, p.char_offset, &p.name)
+                    .map_err(hwp_err)?,
+            )?;
+            Ok(json!({"name": p.name}).to_string())
+        })
+    }
+
+    #[tool(description = "이름으로 본문 책갈피를 지운다.")]
+    pub fn delete_bookmark(
+        &self,
+        Parameters(p): Parameters<BookmarkNameParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let (s, para, c) = body_bookmark(session.core.document(), &p.name)?;
+            bookmark_result(
+                session
+                    .core
+                    .delete_bookmark_native(s, para, c)
+                    .map_err(hwp_err)?,
+            )?;
+            Ok(json!({"deleted": p.name}).to_string())
+        })
+    }
+
+    #[tool(description = "본문 책갈피 이름을 바꾼다. 새 이름은 문서 안에서 유일해야 한다.")]
+    pub fn rename_bookmark(
+        &self,
+        Parameters(p): Parameters<RenameBookmarkParams>,
+    ) -> Result<String, ErrorData> {
+        check_bookmark_name(&p.new_name, "new_name")?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let (s, para, c) = body_bookmark(session.core.document(), &p.name)?;
+            bookmark_result(
+                session
+                    .core
+                    .rename_bookmark_native(s, para, c, &p.new_name)
+                    .map_err(hwp_err)?,
+            )?;
+            Ok(json!({"name": p.new_name}).to_string())
+        })
+    }
+
+    #[tool(
+        description = "문서의 하이퍼링크를 문서 순서로 나열한다: section/para(표 셀 안이면 cell), field_id, start/end(char 범위, end 제외), text, url."
+    )]
+    pub fn list_hyperlinks(
+        &self,
+        Parameters(p): Parameters<DocIdParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let mut out = Vec::new();
+            let mut failed = None;
+            for_each_para(session.core.document(), |loc, _| {
+                match session.core.hyperlinks_native(&loc.hyperlink_target()) {
+                    Ok(links) => out.extend(links.into_iter().map(|l| {
+                        let mut entry = loc.json();
+                        entry.insert("field_id".into(), json!(l.field_id));
+                        entry.insert("start".into(), json!(l.start));
+                        entry.insert("end".into(), json!(l.end));
+                        entry.insert("text".into(), json!(l.text));
+                        entry.insert("url".into(), json!(l.uri));
+                        Value::Object(entry)
+                    })),
+                    Err(e) if failed.is_none() => failed = Some(e),
+                    Err(_) => {}
+                }
+            });
+            if let Some(e) = failed {
+                return Err(hwp_err(e));
+            }
+            Ok(json!({ "hyperlinks": out }).to_string())
+        })
+    }
+
+    #[tool(
+        description = "문단(표 셀 안이면 cell)의 글자 범위 start..end(end 제외, char 단위)에 웹 링크(http/https)를 건다. 글자와 서식은 그대로 둔다(파란 밑줄 등은 apply_char_format). 다른 필드와 겹치면 거부한다. 결과의 field_id 로 고치거나 지운다."
+    )]
+    pub fn insert_hyperlink(
+        &self,
+        Parameters(p): Parameters<InsertHyperlinkParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            check_offset(
+                &session.core,
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                "end",
+                p.end,
+            )?;
+            let target = ParaLoc::of(p.section, p.para, p.cell.as_ref()).hyperlink_target();
+            let field_id = session
+                .core
+                .insert_hyperlink_native(&target, p.start, p.end, &p.url)
+                .map_err(hwp_err)?;
+            Ok(json!({"field_id": field_id}).to_string())
+        })
+    }
+
+    #[tool(
+        description = "하이퍼링크의 주소(url)와/또는 표시 글자(text)를 바꾼다. 위치와 field_id 는 list_hyperlinks 로 파악한다."
+    )]
+    pub fn update_hyperlink(
+        &self,
+        Parameters(p): Parameters<UpdateHyperlinkParams>,
+    ) -> Result<String, ErrorData> {
+        if p.url.is_none() && p.text.is_none() {
+            return Err(ErrorData::invalid_params(
+                "url 과 text 중 하나는 있어야 한다",
+                None,
+            ));
+        }
+        self.store.with_session_edit(&p.doc_id, |session| {
+            paragraph_at(session.core.document(), p.section, p.para, p.cell.as_ref())?;
+            let target = ParaLoc::of(p.section, p.para, p.cell.as_ref()).hyperlink_target();
+            if let Some(url) = &p.url {
+                session
+                    .core
+                    .update_hyperlink_native(&target, p.field_id, url)
+                    .map_err(hwp_err)?;
+            }
+            if let Some(text) = &p.text {
+                session
+                    .core
+                    .replace_hyperlink_text_native(&target, p.field_id, text)
+                    .map_err(hwp_err)?;
+            }
+            Ok(json!({"field_id": p.field_id}).to_string())
+        })
+    }
+
+    #[tool(
+        description = "하이퍼링크를 푼다. 표시 글자와 서식은 남는다. 위치와 field_id 는 list_hyperlinks 로 파악한다."
+    )]
+    pub fn remove_hyperlink(
+        &self,
+        Parameters(p): Parameters<HyperlinkAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            paragraph_at(session.core.document(), p.section, p.para, p.cell.as_ref())?;
+            let target = ParaLoc::of(p.section, p.para, p.cell.as_ref()).hyperlink_target();
+            session
+                .core
+                .remove_hyperlink_native(&target, p.field_id)
+                .map_err(hwp_err)?;
+            Ok(json!({"removed": p.field_id}).to_string())
         })
     }
 
@@ -2764,46 +3175,21 @@ impl HangulMcp {
     pub fn list_forms(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
         self.store.with_session(&p.doc_id, |session| {
             let mut forms = Vec::new();
-            let mut push = |loc: Value, f: &FormObject| {
-                let mut entry = form_value_json(f);
-                entry
-                    .as_object_mut()
-                    .expect("form_value_json 은 객체")
-                    .extend(loc.as_object().expect("위치는 객체").clone());
-                forms.push(entry);
-            };
-            for (sec_idx, sec) in session.core.document().sections.iter().enumerate() {
-                for (para_idx, para) in sec.paragraphs.iter().enumerate() {
-                    for (ci, ctrl) in para.controls.iter().enumerate() {
-                        match ctrl {
-                            Control::Form(f) => push(
-                                json!({"section": sec_idx, "para": para_idx, "control": ci}),
-                                f,
-                            ),
-                            Control::Table(t) => {
-                                for (cell_idx, cell) in t.cells.iter().enumerate() {
-                                    for (cp, cell_para) in cell.paragraphs.iter().enumerate() {
-                                        for (fci, fc) in cell_para.controls.iter().enumerate() {
-                                            if let Control::Form(f) = fc {
-                                                push(
-                                                    json!({
-                                                        "section": sec_idx,
-                                                        "para": para_idx,
-                                                        "control": fci,
-                                                        "cell": {"control": ci, "cell": cell_idx, "cell_para": cp},
-                                                    }),
-                                                    f,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
+            for_each_para(session.core.document(), |loc, para| {
+                for (ci, ctrl) in para.controls.iter().enumerate() {
+                    if let Control::Form(f) = ctrl {
+                        let mut entry = loc.json();
+                        entry.insert("control".into(), json!(ci));
+                        entry.extend(
+                            form_value_json(f)
+                                .as_object()
+                                .expect("form_value_json 은 객체")
+                                .clone(),
+                        );
+                        forms.push(Value::Object(entry));
                     }
                 }
-            }
+            });
             Ok(json!({ "forms": forms }).to_string())
         })
     }

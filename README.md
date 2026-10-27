@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (58)
+## Tools (66)
 
 **Session**
 
@@ -176,6 +176,18 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 | `get_form_info(doc_id, section, para, control, cell?)` | Details: size, colors, attributes, combo box items (not available for a combo box inside a cell) |
 | `set_form_value(doc_id, section, para, control, cell?, value?, text?, caption?)` | Set a value (at least one of the three) |
 
+**Bookmarks and hyperlinks**
+
+| Tool | Description |
+|------|-------------|
+| `list_bookmarks(doc_id)` | Every bookmark in document order (`name`, `section/para/control`, `char_offset`; `cell` inside a table cell) |
+| `add_bookmark(doc_id, section, para, char_offset, name)` | Add a bookmark in a body paragraph. Names are unique in the document |
+| `rename_bookmark(doc_id, name, new_name)` / `delete_bookmark(doc_id, name)` | Rename / delete a body bookmark by name |
+| `list_hyperlinks(doc_id)` | Every hyperlink in body and table-cell paragraphs (`field_id`, `start`/`end` char range, `text`, `url`) |
+| `insert_hyperlink(doc_id, section, para, cell?, start, end, url)` | Link the text `start..end` (end exclusive) to an `http(s)://` URL. Text and character format are kept (style it with `apply_char_format`); ranges overlapping another field are rejected |
+| `update_hyperlink(doc_id, section, para, cell?, field_id, url?, text?)` | Change the URL and/or the displayed text |
+| `remove_hyperlink(doc_id, section, para, cell?, field_id)` | Unlink; the text stays |
+
 ## Known limitations
 
 - **The form object tools need rhwp's form object serializer (`serializer/hwpx/form.rs`).**
@@ -185,6 +197,8 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 - **Combo box items inside table cells cannot be read.** rhwp extracts combo box items from
   the document script only for body-level form objects, so `get_form_info` rejects a combo box
   inside a cell. Its value is still readable and settable with `get_form_value`/`set_form_value`.
+- **Bookmarks inside table cells are listed but cannot be renamed or deleted**, and bookmarks
+  are added to body paragraphs only: rhwp's bookmark editing addresses body paragraphs only.
 - Fields (`ClickHere`) and form objects both save and round-trip correctly.
 
 ## Testing

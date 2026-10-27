@@ -14,17 +14,18 @@ use hangul_mcp::placement::{
     TextWrap as PlacementWrap, VertRelTo,
 };
 use hangul_mcp::server::{
-    ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyPictureFormatParams,
-    ApplyStyleParams, ApplyTableFormatParams, BreakKind, CreateTableParams, DeleteTextParams,
-    DocIdParams, ExportDocumentParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
-    GetCellFormatParams, GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp,
-    HeaderFooterKind, HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
-    InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
-    ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
-    SectionParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
-    SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams, SplitTableCellParams,
-    StyleRef,
+    AddBookmarkParams, ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams,
+    ApplyPictureFormatParams, ApplyStyleParams, ApplyTableFormatParams, BookmarkNameParams,
+    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, ExportDocumentParams,
+    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
+    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
+    HeaderFooterPages, HeaderFooterParams, HyperlinkAtParams, InsertBreakParams,
+    InsertHyperlinkParams, InsertNoteParams, InsertPictureParams, InsertTableColumnParams,
+    InsertTableRowParams, InsertTextParams, MergeParagraphParams, MergeTableCellsParams, NoteKind,
+    ObjectAtParams, OpenDocumentParams, ParaParams, ParaTargetParams, RenameBookmarkParams,
+    RenderPageParams, ReplaceTextParams, SaveDocumentParams, SectionParams, SetCellTextParams,
+    SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams,
+    SplitParagraphParams, SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -4139,4 +4140,421 @@ fn export_document_rejects_bad_range_and_extension() {
         );
         assert!(!std::path::Path::new(&path).exists(), "{name} 이 쓰였다");
     }
+}
+
+fn list_bookmarks(server: &HangulMcp, doc_id: &str) -> Vec<Value> {
+    let out: Value = serde_json::from_str(
+        &server
+            .list_bookmarks(Parameters(DocIdParams {
+                doc_id: doc_id.to_string(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out["bookmarks"].as_array().unwrap().clone()
+}
+
+fn add_bookmark(
+    server: &HangulMcp,
+    doc_id: &str,
+    para: usize,
+    char_offset: usize,
+    name: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.add_bookmark(Parameters(AddBookmarkParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        char_offset,
+        name: name.to_string(),
+    }))
+}
+
+fn rename_bookmark(
+    server: &HangulMcp,
+    doc_id: &str,
+    name: &str,
+    new_name: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.rename_bookmark(Parameters(RenameBookmarkParams {
+        doc_id: doc_id.to_string(),
+        name: name.to_string(),
+        new_name: new_name.to_string(),
+    }))
+}
+
+fn delete_bookmark(
+    server: &HangulMcp,
+    doc_id: &str,
+    name: &str,
+) -> Result<String, rmcp::ErrorData> {
+    server.delete_bookmark(Parameters(BookmarkNameParams {
+        doc_id: doc_id.to_string(),
+        name: name.to_string(),
+    }))
+}
+
+fn bookmark_names(doc: &rhwp::model::document::Document) -> Vec<String> {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .filter_map(|c| match c {
+            rhwp::model::control::Control::Bookmark(b) => Some(b.name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 넣기·이름 바꾸기·지우기가 목록과 HWPX/HWP 저장본에 그대로 나타나고 본문 글자는 그대로다.
+#[test]
+fn bookmark_add_rename_delete_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let text = para_text_of(&server, &doc_id, 0);
+    add_bookmark(&server, &doc_id, 0, 2, "첫책갈피").unwrap();
+    add_bookmark(&server, &doc_id, 0, 0, "앞").unwrap();
+    let list = list_bookmarks(&server, &doc_id);
+    let got: Vec<_> = list
+        .iter()
+        .map(|b| {
+            (
+                b["name"].as_str().unwrap(),
+                b["char_offset"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got, [("앞", 0), ("첫책갈피", 2)], "{list:?}");
+    assert_eq!(para_text_of(&server, &doc_id, 0), text);
+    for (ext, doc) in save_both(&server, &doc_id, "bookmark_add") {
+        assert_eq!(bookmark_names(&doc), ["앞", "첫책갈피"], "{ext}");
+    }
+
+    rename_bookmark(&server, &doc_id, "첫책갈피", "바뀐이름").unwrap();
+    delete_bookmark(&server, &doc_id, "앞").unwrap();
+    let list = list_bookmarks(&server, &doc_id);
+    assert_eq!(list.len(), 1, "{list:?}");
+    assert_eq!(
+        (list[0]["name"].as_str(), list[0]["char_offset"].as_u64()),
+        (Some("바뀐이름"), Some(2))
+    );
+    assert_eq!(para_text_of(&server, &doc_id, 0), text);
+    for (ext, doc) in save_both(&server, &doc_id, "bookmark_edit") {
+        assert_eq!(bookmark_names(&doc), ["바뀐이름"], "{ext}");
+    }
+}
+
+#[test]
+fn bookmark_tools_reject_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    add_bookmark(&server, &doc_id, 0, 0, "A").unwrap();
+    add_bookmark(&server, &doc_id, 0, 1, "B").unwrap();
+    let len = para_text_of(&server, &doc_id, 0).chars().count();
+    assert!(
+        add_bookmark(&server, &doc_id, 0, 0, "A").is_err(),
+        "중복 이름"
+    );
+    assert!(
+        add_bookmark(&server, &doc_id, 0, 0, " ").is_err(),
+        "빈 이름"
+    );
+    assert!(
+        add_bookmark(&server, &doc_id, 0, 0, "두\n줄").is_err(),
+        "줄바꿈"
+    );
+    assert!(
+        add_bookmark(&server, &doc_id, 0, len + 1, "C").is_err(),
+        "문단 끝 너머"
+    );
+    assert!(
+        add_bookmark(&server, &doc_id, 999, 0, "C").is_err(),
+        "없는 문단"
+    );
+    assert!(
+        rename_bookmark(&server, &doc_id, "A", "B").is_err(),
+        "이미 있는 이름으로"
+    );
+    assert!(
+        rename_bookmark(&server, &doc_id, "없음", "C").is_err(),
+        "없는 책갈피"
+    );
+    assert!(
+        rename_bookmark(&server, &doc_id, "A", "").is_err(),
+        "빈 새 이름"
+    );
+    assert!(
+        delete_bookmark(&server, &doc_id, "없음").is_err(),
+        "없는 책갈피"
+    );
+    undo(&server, &doc_id).expect("undo B");
+    undo(&server, &doc_id).expect("undo A");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 책갈피 편집이 기록을 남김"
+    );
+}
+
+fn list_hyperlinks(server: &HangulMcp, doc_id: &str) -> Vec<Value> {
+    let out: Value = serde_json::from_str(
+        &server
+            .list_hyperlinks(Parameters(DocIdParams {
+                doc_id: doc_id.to_string(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out["hyperlinks"].as_array().unwrap().clone()
+}
+
+fn insert_hyperlink(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, cell): (usize, Option<CellTarget>),
+    (start, end): (usize, usize),
+    url: &str,
+) -> Result<u32, rmcp::ErrorData> {
+    server
+        .insert_hyperlink(Parameters(InsertHyperlinkParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para,
+            cell,
+            start,
+            end,
+            url: url.to_string(),
+        }))
+        .map(|out| {
+            serde_json::from_str::<Value>(&out).unwrap()["field_id"]
+                .as_u64()
+                .unwrap() as u32
+        })
+}
+
+/// (para, cell 위치, text, url) 로 줄인 링크 목록.
+fn link_summary(links: &[Value]) -> Vec<(u64, Value, String, String)> {
+    links
+        .iter()
+        .map(|l| {
+            (
+                l["para"].as_u64().unwrap(),
+                l["cell"].clone(),
+                l["text"].as_str().unwrap().to_string(),
+                l["url"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// 본문과 표 셀 문단의 링크 걸기·주소/글자 바꾸기·풀기가 목록과 HWPX/HWP 저장본에 나타난다.
+#[test]
+fn hyperlink_body_and_cell_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_at0(&server, &doc_id, "LINKTEXT ");
+    let (tp, tc) = create_table(&server, &doc_id, 1, 1);
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: tp,
+            control: tc,
+            cell: 0,
+            cell_para: None,
+            text: "셀링크".to_string(),
+        }))
+        .unwrap();
+    // create_table 은 para 0 에 표 문단을 끼우므로 본문 글자는 뒤 문단으로 밀린다.
+    let body_para = para_starting_with(&server, &doc_id, "LINKTEXT");
+    let cell = || CellTarget {
+        control: tc,
+        cell: 0,
+        cell_para: None,
+    };
+    let body_id = insert_hyperlink(
+        &server,
+        &doc_id,
+        (body_para, None),
+        (0, 4),
+        "https://example.com/a",
+    )
+    .unwrap();
+    let cell_id = insert_hyperlink(
+        &server,
+        &doc_id,
+        (tp, Some(cell())),
+        (0, 2),
+        "http://example.org/",
+    )
+    .unwrap();
+    let cell_json = serde_json::json!({"control": tc, "cell": 0, "cell_para": 0});
+    let want = vec![
+        (
+            tp as u64,
+            cell_json.clone(),
+            "셀링".to_string(),
+            "http://example.org/".to_string(),
+        ),
+        (
+            body_para as u64,
+            Value::Null,
+            "LINK".to_string(),
+            "https://example.com/a".to_string(),
+        ),
+    ];
+    let mut got = link_summary(&list_hyperlinks(&server, &doc_id));
+    got.sort_by_key(|g| g.0);
+    let mut want_sorted = want.clone();
+    want_sorted.sort_by_key(|g| g.0);
+    assert_eq!(got, want_sorted);
+
+    server
+        .update_hyperlink(Parameters(UpdateHyperlinkParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: body_para,
+            cell: None,
+            field_id: body_id,
+            url: Some("https://example.com/b".to_string()),
+            text: Some("주소".to_string()),
+        }))
+        .unwrap();
+    server
+        .remove_hyperlink(Parameters(HyperlinkAtParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: tp,
+            cell: Some(cell()),
+            field_id: cell_id,
+        }))
+        .unwrap();
+    let want = vec![(
+        body_para as u64,
+        Value::Null,
+        "주소".to_string(),
+        "https://example.com/b".to_string(),
+    )];
+    assert_eq!(link_summary(&list_hyperlinks(&server, &doc_id)), want);
+    assert!(para_text_of(&server, &doc_id, body_para).starts_with("주소TEXT "));
+    for ext in ["hwpx", "hwp"] {
+        let path = temp_out(&format!("hyperlink.{ext}"));
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.clone(),
+                output_path: Some(path.clone()),
+            }))
+            .unwrap();
+        let (reopened, _) = open(&server, &path);
+        assert_eq!(
+            link_summary(&list_hyperlinks(&server, &reopened)),
+            want,
+            "{ext}"
+        );
+    }
+}
+
+#[test]
+fn hyperlink_tools_reject_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    insert_at0(&server, &doc_id, "LINKTEXT ");
+    let len = para_text_of(&server, &doc_id, 0).chars().count();
+    let id = insert_hyperlink(&server, &doc_id, (0, None), (0, 4), "https://example.com/").unwrap();
+    for (what, range, url) in [
+        ("빈 범위", (2, 2), "https://example.com/"),
+        ("거꾸로", (3, 1), "https://example.com/"),
+        ("문단 끝 너머", (0, len + 1), "https://example.com/"),
+        ("겹침", (2, 6), "https://example.com/"),
+        ("http 아님", (5, 6), "ftp://example.com/"),
+        ("공백 주소", (5, 6), "https://exa mple.com/"),
+    ] {
+        assert!(
+            insert_hyperlink(&server, &doc_id, (0, None), range, url).is_err(),
+            "{what}"
+        );
+    }
+    let update = |field_id: u32, url: Option<&str>, text: Option<&str>| {
+        server.update_hyperlink(Parameters(UpdateHyperlinkParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            field_id,
+            url: url.map(str::to_string),
+            text: text.map(str::to_string),
+        }))
+    };
+    assert!(update(id, None, None).is_err(), "바꿀 것 없음");
+    assert!(
+        update(id + 100, Some("https://a.example/"), None).is_err(),
+        "없는 field_id"
+    );
+    assert!(
+        update(id, Some("mailto:a@b"), None).is_err(),
+        "웹 주소 아님"
+    );
+    assert!(update(id, None, Some("두\n줄")).is_err(), "여러 줄 글자");
+    // 주소는 맞고 글자가 틀리면 주소 변경도 되돌아가야 한다.
+    assert!(
+        update(id, Some("https://changed.example/"), Some("")).is_err(),
+        "빈 글자"
+    );
+    assert_eq!(
+        list_hyperlinks(&server, &doc_id)[0]["url"].as_str(),
+        Some("https://example.com/")
+    );
+    assert!(server
+        .remove_hyperlink(Parameters(HyperlinkAtParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            cell: None,
+            field_id: id + 100,
+        }))
+        .is_err());
+    undo(&server, &doc_id).expect("undo insert_hyperlink");
+    undo(&server, &doc_id).expect("undo insert_text");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 링크 편집이 기록을 남김"
+    );
+}
+
+/// 구역 0 문단 `para` 의 글자.
+fn para_text_of(server: &HangulMcp, doc_id: &str, para: usize) -> String {
+    let out: Value = serde_json::from_str(
+        &server
+            .get_text(Parameters(GetTextParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para_start: Some(para),
+                para_end: Some(para),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out["paragraphs"][0]["text"].as_str().unwrap().to_string()
+}
+
+/// 구역 0 에서 글자가 `prefix` 로 시작하는 첫 문단.
+fn para_starting_with(server: &HangulMcp, doc_id: &str, prefix: &str) -> usize {
+    let out: Value = serde_json::from_str(
+        &server
+            .get_text(Parameters(GetTextParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para_start: None,
+                para_end: None,
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    out["paragraphs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["text"].as_str().unwrap().starts_with(prefix))
+        .unwrap_or_else(|| panic!("'{prefix}' 문단 없음: {out}"))["para"]
+        .as_u64()
+        .unwrap() as usize
 }
