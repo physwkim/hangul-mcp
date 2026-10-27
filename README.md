@@ -214,10 +214,11 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 cargo nextest run
 ```
 
-`tests/roundtrip.rs` asserts an open → edit → save → re-parse (`parse_hwpx`) round trip
-against the fixtures in `tests/fixtures/` (copied from rhwp's samples; `equation_in_cell.hwpx` is
+`tests/roundtrip.rs` asserts an open → edit → save → re-parse (`parse_hwpx` / `parse_hwp`) round
+trip against the fixtures in `tests/fixtures/` (copied from rhwp's samples; `equation_in_cell.hwpx` is
 rhwp's `issue7593/repro-equation-issue7593.hwpx` with a second equation (`z^2`) appended to the
-first cell paragraph that holds one).
+first cell paragraph that holds one). `biz_plan.hwp` is a Hancom-written HWP 5.0 source, so the
+`.hwp` reader is exercised on a real file and not only on files rhwp wrote itself.
 
 ## Out of scope (possible follow-ups)
 

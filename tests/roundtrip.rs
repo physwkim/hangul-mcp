@@ -5557,3 +5557,102 @@ fn set_columns_rejects_invalid_input() {
         "실패한 set_columns 가 되돌리기 기록을 남김"
     );
 }
+/// 문서의 모든 본문 문단과 표 셀 문단 텍스트 (위치 표시 포함).
+fn all_texts(doc: &rhwp::model::document::Document) -> Vec<String> {
+    let mut out = Vec::new();
+    for (si, sec) in doc.sections.iter().enumerate() {
+        for (pi, para) in sec.paragraphs.iter().enumerate() {
+            out.push(format!("{si}/{pi}: {}", para.text));
+            for (ci, ctrl) in para.controls.iter().enumerate() {
+                if let rhwp::model::control::Control::Table(t) = ctrl {
+                    for (k, cell) in t.cells.iter().enumerate() {
+                        for (cp, p) in cell.paragraphs.iter().enumerate() {
+                            out.push(format!("{si}/{pi}/{ci}/{k}/{cp}: {}", p.text));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn biz_plan_original() -> Vec<String> {
+    let bytes = std::fs::read(fixture("biz_plan.hwp")).unwrap();
+    all_texts(&rhwp::parser::parse_hwp(&bytes).expect("원본 HWP 파싱"))
+}
+
+/// 한컴이 만든 .hwp 원본: 편집 없이 HWP/HWPX 로 저장해도 본문·표 셀 텍스트가 그대로 남는다.
+#[test]
+fn hwp_source_saves_unchanged() {
+    let server = HangulMcp::new();
+    let (doc_id, info) = open(&server, &fixture("biz_plan.hwp"));
+    assert_eq!(info["paragraphs_per_section"], serde_json::json!([93]));
+    let original = biz_plan_original();
+    for (ext, doc) in save_both(&server, &doc_id, "biz_plan_unchanged") {
+        assert_eq!(all_texts(&doc), original, "{ext}");
+    }
+}
+
+/// 한컴이 만든 .hwp 원본: 본문 삽입·치환, 표 셀 텍스트 교체 뒤 HWP/HWPX 저장본에서
+/// 바뀐 문단만 달라지고 나머지는 원본과 같다.
+#[test]
+fn hwp_source_edit_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("biz_plan.hwp"));
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 48,
+            cell: None,
+            char_offset: 0,
+            text: "[수정] ".to_string(),
+        }))
+        .unwrap();
+    server
+        .replace_text(Parameters(ReplaceTextParams {
+            doc_id: doc_id.clone(),
+            query: "사업목적".to_string(),
+            replacement: "추진목적".to_string(),
+            all: Some(true),
+            case_sensitive: None,
+        }))
+        .unwrap();
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 2,
+            control: 0,
+            cell: 1,
+            cell_para: None,
+            text: "셀 교체".to_string(),
+        }))
+        .unwrap();
+    let mut want = biz_plan_original();
+    for line in want.iter_mut() {
+        if line.starts_with("0/48: ") {
+            *line = line.replacen("0/48: ", "0/48: [수정] ", 1);
+        } else {
+            *line = line.replace("사업목적", "추진목적");
+        }
+    }
+    let cell = want
+        .iter_mut()
+        .find(|l| l.starts_with("0/2/0/1/0: "))
+        .expect("표 셀 1 문단 0");
+    *cell = "0/2/0/1/0: 셀 교체".to_string();
+    let changed = biz_plan_original()
+        .iter()
+        .zip(&want)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        changed >= 4,
+        "바뀐 문단 {changed} 개: 편집이 원본에 닿지 않음"
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "biz_plan_edit") {
+        assert_eq!(all_texts(&doc), want, "{ext}");
+    }
+}
