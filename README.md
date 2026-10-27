@@ -223,7 +223,8 @@ rhwp's `issue7593/repro-equation-issue7593.hwpx` with a second equation (`z^2`) 
 first cell paragraph that holds one). `biz_plan.hwp` is a Hancom-written HWP 5.0 source, so the
 `.hwp` reader is exercised on a real file and not only on files rhwp wrote itself.
 `cell_bookmark.hwpx` is rhwp's `issue6284/child_policy_top_caption_charts.hwpx`, whose bookmarks
-all sit in table cells.
+all sit in table cells. `columns_unequal.hwpx` is `ref_text.hwpx` with its `colPr` changed to two
+columns of unequal width (`sameSz="0"`, two `colSz`), since no sample's first column definition has one.
 
 ## Out of scope (possible follow-ups)
 

@@ -5607,6 +5607,67 @@ fn ir_columns(doc: &rhwp::model::document::Document) -> Columns {
     Columns::from_column_def(cd)
 }
 
+/// 재파싱 문서 구역 0 의 첫 단 정의의 (너비 같게, 단별 너비).
+fn ir_column_widths(doc: &rhwp::model::document::Document) -> (bool, Vec<i16>) {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            rhwp::model::control::Control::ColumnDef(cd) => {
+                Some((cd.same_width, cd.widths.clone()))
+            }
+            _ => None,
+        })
+        .expect("단 정의")
+}
+
+/// 너비가 다른 2단(columns_unequal.hwpx: ref_text.hwpx 의 colPr 만 sameSz="0" 2단으로 바꾼 것)은
+/// 간격·종류만 바꾸면 단별 너비가 HWPX/HWP 저장본에 남고, 단 수를 바꾸면 너비 같게로 돌아간다.
+#[test]
+fn columns_keep_unequal_widths_unless_count_changes() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("columns_unequal.hwpx"));
+    let saved: Vec<_> = save_both(&server, &doc_id, "columns_unequal_src")
+        .into_iter()
+        .map(|(ext, doc)| (ext, ir_column_widths(&doc)))
+        .collect();
+    let widths = saved[0].1 .1.clone();
+    for (ext, got) in &saved {
+        assert_eq!(widths.len(), 2, "픽스처 단별 너비");
+        assert_eq!(got, &(false, widths.clone()), "{ext} 편집 전 저장");
+    }
+    for step in [
+        Columns {
+            spacing_mm: Some(8.0),
+            ..Default::default()
+        },
+        Columns {
+            kind: Some(ColumnKind::Distribute),
+            ..Default::default()
+        },
+    ] {
+        set_columns(&server, &doc_id, step).expect("set_columns");
+        for (ext, doc) in save_both(&server, &doc_id, "columns_unequal_kept") {
+            assert_eq!(ir_column_widths(&doc), (false, widths.clone()), "{ext}");
+        }
+    }
+    set_columns(
+        &server,
+        &doc_id,
+        Columns {
+            count: Some(3),
+            ..Default::default()
+        },
+    )
+    .expect("set_columns count");
+    for (ext, doc) in save_both(&server, &doc_id, "columns_unequal_count") {
+        let (same, w) = ir_column_widths(&doc);
+        assert!(same, "{ext} 단 수를 바꿨는데 너비 같게 아님: {w:?}");
+        assert_eq!(ir_columns(&doc).count, Some(3), "{ext}");
+    }
+}
+
 /// 2단 배분으로 바꾸면 조회와 HWPX/HWP 저장본에 남고, 간격만 바꾸면 단 수·종류는 그대로다.
 #[test]
 fn columns_roundtrip() {
