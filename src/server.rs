@@ -54,18 +54,31 @@ fn hwp_err(e: rhwp::HwpError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
-/// rhwp 본문 편집은 문단 길이를 넘는 char_offset 을 오류 없이 끝으로 당기거나 무시하므로,
-/// 본문 위치를 받는 도구는 모두 편집 전에 `end <= 문단 길이` 를 이 검사로 확인한다.
-fn check_body_offset(
+/// 본문 문단, 또는 `cell` 이 있으면 그 표 셀 문단의 글자 수.
+fn para_len(
     core: &DocumentCore,
     section: usize,
     para: usize,
+    cell: Option<&CellTarget>,
+) -> Result<usize, ErrorData> {
+    Ok(paragraph_at(core.document(), section, para, cell)?
+        .text
+        .chars()
+        .count())
+}
+
+/// rhwp 편집은 문단 길이를 넘는 char_offset 을 오류 없이 끝으로 당기거나 무시하므로,
+/// 위치를 받는 도구는 모두 편집 전에 `end <= 문단 길이` 를 이 검사로 확인한다.
+/// `cell` 이 있으면 그 표 셀 문단의 길이로 잰다.
+fn check_offset(
+    core: &DocumentCore,
+    section: usize,
+    para: usize,
+    cell: Option<&CellTarget>,
     name: &str,
     end: usize,
 ) -> Result<(), ErrorData> {
-    let len = core
-        .get_paragraph_length_native(section, para)
-        .map_err(hwp_err)?;
+    let len = para_len(core, section, para, cell)?;
     if end > len {
         return Err(ErrorData::invalid_params(
             format!("{name} {end} 가 문단 길이 {len} 를 넘는다"),
@@ -81,14 +94,16 @@ fn check_body_offset(
 /// 반면 `Paragraph::split_at` 은 글자처럼 취급한 개체·각주 등을 한 칸씩 더 센 논리 위치를
 /// 받으므로, 앞에 인라인 개체가 있으면 그대로 넘긴 위치가 개체 수만큼 앞당겨진다.
 /// 같은 글자 위치에 놓인 개체는 분할 뒤쪽 문단으로 간다(insert_text 가 개체 앞에 넣는 것과 같다).
-fn body_split_offset(
+/// 셀 문단 분할(`split_paragraph_in_cell_native`)도 같은 `split_at` 을 쓰므로 `cell` 이면 그 문단으로 센다.
+fn split_offset(
     core: &DocumentCore,
     section: usize,
     para: usize,
+    cell: Option<&CellTarget>,
     char_offset: usize,
 ) -> Result<usize, ErrorData> {
-    check_body_offset(core, section, para, "char_offset", char_offset)?;
-    let para = &core.document().sections[section].paragraphs[para];
+    check_offset(core, section, para, cell, "char_offset", char_offset)?;
+    let para = paragraph_at(core.document(), section, para, cell)?;
     // `split_at` 이 한 칸씩 세는 컨트롤(`Paragraph::occupies_split_slot`)과 같은 집합이다.
     // 칸 컨트롤은 텍스트 위치 순서이므로, 글자 위치 char_offset 앞의 칸 m 개만 더하면
     // split_at 의 `논리 위치 − 앞선 칸 수` 가 정확히 char_offset 으로 돌아온다.
@@ -326,6 +341,8 @@ pub struct InsertTextParams {
     pub char_offset: usize,
     /// 삽입할 텍스트
     pub text: String,
+    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    pub cell: Option<CellTarget>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -340,6 +357,8 @@ pub struct DeleteTextParams {
     pub char_offset: usize,
     /// 삭제할 문자 수
     pub count: usize,
+    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    pub cell: Option<CellTarget>,
 }
 
 /// 나누기 종류.
@@ -386,6 +405,20 @@ pub struct SplitParagraphParams {
     pub para: usize,
     /// 분할 지점 (char 단위)
     pub char_offset: usize,
+    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    pub cell: Option<CellTarget>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct MergeParagraphParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 이전 문단에 합칠 문단 인덱스 (cell 이면 표가 속한 문단, 합칠 셀 문단은 cell.cell_para ≥ 1)
+    pub para: usize,
+    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    pub cell: Option<CellTarget>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1196,27 +1229,42 @@ impl HangulMcp {
 
     // ── 텍스트/문단 편집 ──
 
-    #[tool(description = "문단의 지정 위치에 텍스트를 삽입한다.")]
+    #[tool(description = "문단(또는 cell을 주면 표 셀 문단)의 지정 위치에 텍스트를 삽입한다.")]
     pub fn insert_text(
         &self,
         Parameters(p): Parameters<InsertTextParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
-            check_body_offset(
+            let cell = p.cell.as_ref();
+            check_offset(
                 &session.core,
                 p.section,
                 p.para,
+                cell,
                 "char_offset",
                 p.char_offset,
             )?;
-            session
-                .core
-                .insert_text_native(p.section, p.para, p.char_offset, &p.text)
-                .map_err(hwp_err)
+            match cell {
+                Some(c) => session.core.insert_text_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    p.char_offset,
+                    &p.text,
+                ),
+                None => session
+                    .core
+                    .insert_text_native(p.section, p.para, p.char_offset, &p.text),
+            }
+            .map_err(hwp_err)
         })
     }
 
-    #[tool(description = "문단의 지정 위치부터 count자의 텍스트를 삭제한다.")]
+    #[tool(
+        description = "문단(또는 cell을 주면 표 셀 문단)의 지정 위치부터 count자의 텍스트를 삭제한다."
+    )]
     pub fn delete_text(
         &self,
         Parameters(p): Parameters<DeleteTextParams>,
@@ -1229,11 +1277,30 @@ impl HangulMcp {
                 .char_offset
                 .checked_add(p.count)
                 .ok_or_else(|| ErrorData::invalid_params("char_offset + count 가 넘친다", None))?;
-            check_body_offset(&session.core, p.section, p.para, "char_offset + count", end)?;
-            session
-                .core
-                .delete_text_native(p.section, p.para, p.char_offset, p.count)
-                .map_err(hwp_err)
+            let cell = p.cell.as_ref();
+            check_offset(
+                &session.core,
+                p.section,
+                p.para,
+                cell,
+                "char_offset + count",
+                end,
+            )?;
+            match cell {
+                Some(c) => session.core.delete_text_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    p.char_offset,
+                    p.count,
+                ),
+                None => session
+                    .core
+                    .delete_text_native(p.section, p.para, p.char_offset, p.count),
+            }
+            .map_err(hwp_err)
         })
     }
 
@@ -1263,17 +1330,31 @@ impl HangulMcp {
         })
     }
 
-    #[tool(description = "문단을 char_offset 지점에서 두 문단으로 분할한다.")]
+    #[tool(
+        description = "문단(또는 cell을 주면 표 셀 문단)을 char_offset 지점에서 두 문단으로 분할한다."
+    )]
     pub fn split_paragraph(
         &self,
         Parameters(p): Parameters<SplitParagraphParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
-            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
-            session
-                .core
-                .split_paragraph_native(p.section, p.para, offset, None)
-                .map_err(hwp_err)
+            let cell = p.cell.as_ref();
+            let offset = split_offset(&session.core, p.section, p.para, cell, p.char_offset)?;
+            match cell {
+                Some(c) => session.core.split_paragraph_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                    offset,
+                    None,
+                ),
+                None => session
+                    .core
+                    .split_paragraph_native(p.section, p.para, offset, None),
+            }
+            .map_err(hwp_err)
         })
     }
 
@@ -1285,7 +1366,7 @@ impl HangulMcp {
         Parameters(p): Parameters<InsertBreakParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
-            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
+            let offset = split_offset(&session.core, p.section, p.para, None, p.char_offset)?;
             match p.kind.unwrap_or(BreakKind::Page) {
                 BreakKind::Page => session
                     .core
@@ -1298,16 +1379,25 @@ impl HangulMcp {
         })
     }
 
-    #[tool(description = "문단을 이전 문단과 병합한다.")]
+    #[tool(
+        description = "문단을 이전 문단과 병합한다. cell을 주면 표 셀 안의 cell.cell_para 문단(1 이상)을 그 앞 셀 문단과 병합한다."
+    )]
     pub fn merge_paragraph(
         &self,
-        Parameters(p): Parameters<ParaParams>,
+        Parameters(p): Parameters<MergeParagraphParams>,
     ) -> Result<String, ErrorData> {
         self.store.with_session_edit(&p.doc_id, |session| {
-            session
-                .core
-                .merge_paragraph_native(p.section, p.para)
-                .map_err(hwp_err)
+            match p.cell.as_ref() {
+                Some(c) => session.core.merge_paragraph_in_cell_native(
+                    p.section,
+                    p.para,
+                    c.control,
+                    c.cell,
+                    c.cell_para(),
+                ),
+                None => session.core.merge_paragraph_native(p.section, p.para),
+            }
+            .map_err(hwp_err)
         })
     }
 
@@ -1320,14 +1410,8 @@ impl HangulMcp {
     ) -> Result<String, ErrorData> {
         p.format.validate()?;
         self.store.with_session_edit(&p.doc_id, |session| {
+            let len = para_len(&session.core, p.section, p.para, p.cell.as_ref())?;
             let cell = p.cell.as_ref().map(|c| (c.control, c.cell, c.cell_para()));
-            let len = match cell {
-                Some((control, cell, cp)) => session
-                    .core
-                    .get_cell_paragraph_length_native(p.section, p.para, control, cell, cp),
-                None => session.core.get_paragraph_length_native(p.section, p.para),
-            }
-            .map_err(hwp_err)?;
             // rhwp 는 범위 밖이나 빈 범위를 오류 없이 무시하므로 여기서 거른다.
             if p.start >= p.end || p.end > len {
                 return Err(ErrorData::invalid_params(
@@ -1550,7 +1634,7 @@ impl HangulMcp {
             repeat_header: p.repeat_header,
         };
         self.store.with_session_edit(&p.doc_id, |session| {
-            let offset = body_split_offset(&session.core, p.section, p.para, p.char_offset)?;
+            let offset = split_offset(&session.core, p.section, p.para, None, p.char_offset)?;
             session
                 .core
                 .create_table_with_options_native(
@@ -1800,10 +1884,11 @@ impl HangulMcp {
         );
 
         self.store.with_session_edit(&p.doc_id, |session| {
-            check_body_offset(
+            check_offset(
                 &session.core,
                 p.section,
                 p.para,
+                None,
                 "char_offset",
                 p.char_offset,
             )?;
@@ -1877,10 +1962,11 @@ impl HangulMcp {
     ) -> Result<String, ErrorData> {
         check_single_line("text", &p.text)?;
         self.store.with_session_edit(&p.doc_id, |session| {
-            check_body_offset(
+            check_offset(
                 &session.core,
                 p.section,
                 p.para,
+                None,
                 "char_offset",
                 p.char_offset,
             )?;

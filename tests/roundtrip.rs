@@ -13,8 +13,8 @@ use hangul_mcp::server::{
     GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
     HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeTableCellsParams, NoteKind, OpenDocumentParams, ParaParams, ParaTargetParams,
-    RenderPageParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
+    MergeParagraphParams, MergeTableCellsParams, NoteKind, OpenDocumentParams, ParaParams,
+    ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
     SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SplitParagraphParams,
     SplitTableCellParams, StyleRef,
 };
@@ -59,6 +59,7 @@ fn text_insert_replace_roundtrip() {
             para: 0,
             char_offset: 0,
             text: "MCP마커원본".to_string(),
+            cell: None,
         }))
         .expect("insert_text");
 
@@ -334,6 +335,7 @@ fn report_table_fits_page_after_fit() {
                 para: p,
                 char_offset: 0,
                 text: text.to_string(),
+                cell: None,
             }))
             .unwrap();
     }
@@ -360,6 +362,7 @@ fn report_table_fits_page_after_fit() {
                 para: p,
                 char_offset: 0,
                 text: text.to_string(),
+                cell: None,
             }))
             .unwrap();
     }
@@ -716,6 +719,7 @@ fn save_as_hwp_then_hwpx_roundtrip() {
             para: 0,
             char_offset: 0,
             text: "HWP저장마커".to_string(),
+            cell: None,
         }))
         .expect("insert_text");
 
@@ -806,6 +810,7 @@ fn apply_char_format_body_roundtrip() {
             para: 0,
             char_offset: 0,
             text: "빨간마커".to_string(),
+            cell: None,
         }))
         .expect("insert_text");
 
@@ -1042,6 +1047,7 @@ fn get_char_format_reports_runs_and_roundtrips_into_apply() {
             para: 0,
             char_offset: 0,
             text: "빨간마커".to_string(),
+            cell: None,
         }))
         .expect("insert_text");
     let before = get_char_runs(&server, &doc_id, 0, None);
@@ -1146,6 +1152,7 @@ fn apply_para_format_body_roundtrip() {
             section: 0,
             para: 0,
             char_offset: 1,
+            cell: None,
         }))
         .expect("split_paragraph");
     let neighbour_before = get_para(&server, &doc_id, 1, None);
@@ -1901,6 +1908,7 @@ fn body_offset_tools_reject_past_paragraph_end() {
                 para: 0,
                 char_offset: off,
                 text: "X".to_string(),
+                cell: None,
             }))
         }),
         ("delete_text", |s, d, off, _| {
@@ -1911,6 +1919,7 @@ fn body_offset_tools_reject_past_paragraph_end() {
                 para: 0,
                 char_offset: off - 1,
                 count: 1,
+                cell: None,
             }))
         }),
         ("split_paragraph", |s, d, off, _| {
@@ -1919,6 +1928,7 @@ fn body_offset_tools_reject_past_paragraph_end() {
                 section: 0,
                 para: 0,
                 char_offset: off,
+                cell: None,
             }))
         }),
         ("create_table", |s, d, off, _| {
@@ -1947,6 +1957,7 @@ fn body_offset_tools_reject_past_paragraph_end() {
                 para: 0,
                 char_offset: off.min(1),
                 count: 0,
+                cell: None,
             }))
         }),
     ];
@@ -2028,6 +2039,7 @@ fn split_paragraph_offset_counts_text_chars_after_inline_object() {
             section: 0,
             para: 0,
             char_offset: 3,
+            cell: None,
         }))
         .expect("split_paragraph");
     for (ext, doc) in save_both(&server, &doc_id, "split_after_pic") {
@@ -2051,6 +2063,7 @@ fn split_paragraph_at_object_position_moves_object_to_second_paragraph() {
             section: 0,
             para: 0,
             char_offset: 0,
+            cell: None,
         }))
         .expect("split_paragraph");
     for (ext, doc) in save_both(&server, &doc_id, "split_at_pic") {
@@ -2439,6 +2452,7 @@ fn render_page_svg_and_pdf_reflect_unsaved_edits() {
             para: 1,
             char_offset: 0,
             text: "쪽".to_string(),
+            cell: None,
         }))
         .expect("insert_text");
 
@@ -2512,6 +2526,7 @@ fn insert_at0(server: &HangulMcp, doc_id: &str, text: &str) {
             para: 0,
             char_offset: 0,
             text: text.to_string(),
+            cell: None,
         }))
         .expect("insert_text");
 }
@@ -2712,6 +2727,7 @@ fn doc_with_cell_and_body_marker(server: &HangulMcp) -> (String, usize, usize, u
             para: para + 1,
             char_offset: 0,
             text: "마커A".to_string(),
+            cell: None,
         }))
         .unwrap();
     (doc_id, para, control, cell)
@@ -2795,5 +2811,173 @@ fn replace_text_without_match_is_rejected_and_not_recorded() {
             ("마커A".to_string(), String::new()),
             "{ext}"
         );
+    }
+}
+
+/// 첫 표의 (0,0) 셀 좌표: (doc_id, 표 문단, CellTarget 만드는 함수 재료 (control, cell)).
+fn first_table_cell(server: &HangulMcp) -> (String, usize, usize, usize) {
+    let (doc_id, _) = open(server, &fixture("ref_table.hwpx"));
+    let structure: Value = serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    let (section, para, control) = find_first_table(&structure).expect("픽스처에 표 없음");
+    assert_eq!(section, 0, "테스트 헬퍼는 구역 0 만 본다");
+    let table: Value = serde_json::from_str(
+        &server
+            .get_table(Parameters(GetTableParams {
+                doc_id: doc_id.clone(),
+                section,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    (doc_id, para, control, cell_index(&table, 0, 0))
+}
+
+fn cell_paras(
+    doc: &rhwp::model::document::Document,
+    para: usize,
+    control: usize,
+    cell: usize,
+) -> Vec<String> {
+    table_at(doc, para, control).cells[cell]
+        .paragraphs
+        .iter()
+        .map(|p| p.text.clone())
+        .collect()
+}
+
+/// insert_text/delete_text/split_paragraph/merge_paragraph 의 cell 대상은 표 셀 문단을
+/// 고치고 본문 문단은 건드리지 않는다.
+#[test]
+fn text_editing_in_table_cell_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, para, control, cell) = first_table_cell(&server);
+    let target = |cell_para| {
+        Some(CellTarget {
+            control,
+            cell,
+            cell_para,
+        })
+    };
+    let (_, before) = save_both(&server, &doc_id, "cell_edit_before").remove(0);
+    let body_before = para_texts(&before);
+    let insert = |offset, text: &str| {
+        server.insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: offset,
+            text: text.to_string(),
+            cell: target(None),
+        }))
+    };
+    insert(0, "가나다").expect("insert in cell");
+    insert(1, "X").expect("insert in cell middle");
+    server
+        .delete_text(Parameters(DeleteTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 2,
+            count: 1,
+            cell: target(None),
+        }))
+        .expect("delete in cell");
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 2,
+            cell: target(None),
+        }))
+        .expect("split in cell");
+    for (ext, doc) in save_both(&server, &doc_id, "cell_edit_split") {
+        assert_eq!(
+            cell_paras(&doc, para, control, cell),
+            ["가X", "다"],
+            "{ext}"
+        );
+        assert_eq!(para_texts(&doc), body_before, "{ext}: 본문이 바뀜");
+    }
+    server
+        .merge_paragraph(Parameters(MergeParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            cell: target(Some(1)),
+        }))
+        .expect("merge in cell");
+    for (ext, doc) in save_both(&server, &doc_id, "cell_edit_merge") {
+        assert_eq!(cell_paras(&doc, para, control, cell), ["가X다"], "{ext}");
+    }
+}
+
+/// 셀 문단 길이를 넘는 위치는 rhwp 가 조용히 당기지 않도록 오류여야 하고, 아무것도 바꾸지 않는다.
+#[test]
+fn text_editing_in_table_cell_rejects_past_cell_paragraph_end() {
+    let server = HangulMcp::new();
+    let (doc_id, para, control, cell) = first_table_cell(&server);
+    let target = || {
+        Some(CellTarget {
+            control,
+            cell,
+            cell_para: None,
+        })
+    };
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 0,
+            text: "가나".to_string(),
+            cell: target(),
+        }))
+        .unwrap();
+    let errors = [
+        server.insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 3,
+            text: "X".to_string(),
+            cell: target(),
+        })),
+        server.delete_text(Parameters(DeleteTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 1,
+            count: 2,
+            cell: target(),
+        })),
+        server.split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 3,
+            cell: target(),
+        })),
+        server.merge_paragraph(Parameters(MergeParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            cell: target(),
+        })),
+    ];
+    for (i, r) in errors.iter().enumerate() {
+        assert!(r.is_err(), "#{i} 가 성공함: {r:?}");
+    }
+    for (ext, doc) in save_both(&server, &doc_id, "cell_edit_reject") {
+        assert_eq!(cell_paras(&doc, para, control, cell), ["가나"], "{ext}");
     }
 }

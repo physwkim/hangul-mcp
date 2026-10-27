@@ -89,13 +89,16 @@ place in every tool.
 
 | Tool | Description |
 |------|-------------|
-| `insert_text(doc_id, section, para, char_offset, text)` | Insert text |
-| `delete_text(doc_id, section, para, char_offset, count)` | Delete text |
+| `insert_text(doc_id, section, para, char_offset, text, cell?)` | Insert text |
+| `delete_text(doc_id, section, para, char_offset, count, cell?)` | Delete text |
 | `insert_paragraph(doc_id, section, para)` | Insert an empty paragraph |
 | `delete_paragraph(doc_id, section, para)` | Delete a paragraph |
-| `split_paragraph(doc_id, section, para, char_offset)` | Split a paragraph |
-| `merge_paragraph(doc_id, section, para)` | Merge with the previous paragraph |
+| `split_paragraph(doc_id, section, para, char_offset, cell?)` | Split a paragraph |
+| `merge_paragraph(doc_id, section, para, cell?)` | Merge with the previous paragraph (in a cell: `cell.cell_para` ≥ 1 into the one before it) |
 | `insert_break(doc_id, section, para, char_offset, kind?)` | Split the paragraph and start the rest on a new page (`kind="page"`, default) or column (`"column"`) |
+
+`cell = {control, cell, cell_para?}` targets a table cell paragraph instead of the body,
+with `para` the paragraph holding the table (the same form the formatting tools take).
 
 **Formatting**
 
