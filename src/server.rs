@@ -270,7 +270,6 @@ fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
 
-/// 양식 개체 타입 → 표시 문자열 (rhwp `form_type_to_str`와 동일 표기).
 /// 본문 문단 (section, para) 의 컨트롤 control 인 표.
 fn table_at(
     doc: &Document,
@@ -322,6 +321,7 @@ fn form_value_json(f: &FormObject) -> Value {
     })
 }
 
+/// 양식 개체 타입 → 표시 문자열 (rhwp `form_type_to_str`와 동일 표기).
 fn form_type_str(ft: rhwp::model::control::FormType) -> &'static str {
     use rhwp::model::control::FormType;
     match ft {
