@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (30)
+## Tools (31)
 
 **Session**
 
@@ -89,6 +89,12 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `delete_paragraph(doc_id, section, para)` | Delete a paragraph |
 | `split_paragraph(doc_id, section, para, char_offset)` | Split a paragraph |
 | `merge_paragraph(doc_id, section, para)` | Merge with the previous paragraph |
+
+**Character formatting**
+
+| Tool | Description |
+|------|-------------|
+| `apply_char_format(doc_id, section, para, start, end, cell?, format)` | Apply character formatting to the `[start, end)` range of a body paragraph, or of a table cell paragraph when `cell = {control, cell, cell_para?}` is given. `format` fields are all optional and only the given ones change: `bold`, `italic`, `underline`, `underline_type`, `underline_shape`, `underline_color`, `strikethrough`, `strike_shape`, `strike_color`, `font_size_pt`, `font_name`, `text_color`, `shade_color`, `outline_type`, `shadow_type`, `shadow_color`, `shadow_offset_x/y`, `superscript`, `subscript`, `emboss`, `engrave`, `emphasis_dot`, `kerning`, `ratio_percent`, `spacing_percent`, `relative_size_percent`, `char_offset_percent`. Colors are `"#RRGGBB"` |
 
 **Table editing**
 

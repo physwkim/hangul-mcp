@@ -5,10 +5,10 @@
 use std::path::PathBuf;
 
 use hangul_mcp::server::{
-    DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams, GetTableParams, HangulMcp,
-    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, OpenDocumentParams,
-    ParaParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
-    SetFormValueParams,
+    ApplyCharFormatParams, CellTarget, CharFormat, DocIdParams, FieldByNameParams,
+    FitTableToPageParams, FormAtParams, GetTableParams, HangulMcp, InsertTableColumnParams,
+    InsertTableRowParams, InsertTextParams, OpenDocumentParams, ParaParams, ReplaceTextParams,
+    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -762,4 +762,246 @@ fn save_rejects_unknown_extension() {
         .expect_err(".docx 저장은 거부돼야 함");
     assert!(err.message.contains(".hwp"), "에러 메시지: {err:?}");
     assert!(!PathBuf::from(&out_path).exists(), "거부했는데 파일이 생김");
+}
+
+/// 문단 안 char 위치의 글자 모양. char_shapes 는 컨트롤 문자까지 센 UTF-16 위치로
+/// 구간을 나누므로, text 의 char 인덱스는 char_offsets 로 옮겨야 한다.
+fn char_shape_at<'a>(
+    doc: &'a rhwp::model::document::Document,
+    para: &rhwp::model::paragraph::Paragraph,
+    char_idx: usize,
+) -> &'a rhwp::model::style::CharShape {
+    let pos = para.char_offsets[char_idx];
+    let id = para
+        .char_shapes
+        .iter()
+        .rev()
+        .find(|r| r.start_pos <= pos)
+        .expect("글자 모양 구간 없음")
+        .char_shape_id;
+    &doc.doc_info.char_shapes[id as usize]
+}
+
+fn empty_format() -> CharFormat {
+    serde_json::from_str("{}").unwrap()
+}
+
+/// HWP ColorRef 는 0x00BBGGRR — 빨강 #FF0000 은 0x0000FF.
+const RED_BGR: u32 = 0x0000FF;
+
+/// 본문 범위에 색/진하게/크기/글꼴을 적용하면 HWPX·HWP 저장본 모두에서 그 범위만
+/// 바뀌고, 범위 바로 뒤 글자는 원래 서식을 유지해야 한다.
+#[test]
+fn apply_char_format_body_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            char_offset: 0,
+            text: "빨간마커".to_string(),
+        }))
+        .expect("insert_text");
+
+    let format = CharFormat {
+        bold: Some(true),
+        font_size_pt: Some(14.0),
+        font_name: Some("hangul-mcp 테스트 글꼴".to_string()),
+        text_color: Some("#FF0000".to_string()),
+        ..empty_format()
+    };
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            start: 0,
+            end: 4,
+            cell: None,
+            format,
+        }))
+        .expect("apply_char_format");
+
+    let hwpx_path = temp_out("char_format.hwpx");
+    let hwp_path = temp_out("char_format.hwp");
+    for path in [&hwpx_path, &hwp_path] {
+        server
+            .save_document(Parameters(SaveDocumentParams {
+                doc_id: doc_id.clone(),
+                output_path: Some(path.clone()),
+            }))
+            .expect("save_document");
+    }
+    let hwpx_doc =
+        rhwp::parser::hwpx::parse_hwpx(&std::fs::read(&hwpx_path).unwrap()).expect("HWPX 재파싱");
+    let hwp_doc = rhwp::parser::parse_hwp(&std::fs::read(&hwp_path).unwrap()).expect("HWP 재파싱");
+
+    for (label, doc) in [("hwpx", &hwpx_doc), ("hwp", &hwp_doc)] {
+        let para = &doc.sections[0].paragraphs[0];
+        assert!(
+            para.text.starts_with("빨간마커"),
+            "{label}: {:?}",
+            para.text
+        );
+        assert!(
+            para.text.chars().count() > 4,
+            "{label}: 범위 뒤 글자가 없어 경계를 볼 수 없음"
+        );
+        for i in [0, 3] {
+            let cs = char_shape_at(doc, para, i);
+            assert_eq!(cs.text_color, RED_BGR, "{label}: [{i}] 색");
+            assert!(cs.bold, "{label}: [{i}] 진하게");
+            assert_eq!(cs.base_size, 1400, "{label}: [{i}] 크기");
+            let font = &doc.doc_info.font_faces[0][cs.font_ids[0] as usize];
+            assert_eq!(font.name, "hangul-mcp 테스트 글꼴", "{label}: [{i}] 글꼴");
+        }
+        let after = char_shape_at(doc, para, 4);
+        assert_ne!(after.text_color, RED_BGR, "{label}: 범위 밖 글자까지 빨강");
+        assert_ne!(after.base_size, 1400, "{label}: 범위 밖 글자까지 14pt");
+    }
+}
+
+#[test]
+fn apply_char_format_cell_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_table.hwpx"));
+    let structure: Value = serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .expect("get_structure"),
+    )
+    .unwrap();
+    let (section, para, control) = find_first_table(&structure).expect("픽스처에 표 없음");
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section,
+            para,
+            control,
+            cell: 0,
+            cell_para: None,
+            text: "셀서식테스트".to_string(),
+        }))
+        .expect("set_cell_text");
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section,
+            para,
+            start: 0,
+            end: 2,
+            cell: Some(CellTarget {
+                control,
+                cell: 0,
+                cell_para: None,
+            }),
+            format: CharFormat {
+                italic: Some(true),
+                text_color: Some("#ff0000".to_string()),
+                ..empty_format()
+            },
+        }))
+        .expect("apply_char_format (cell)");
+
+    let out_path = temp_out("char_format_cell.hwpx");
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.clone(),
+            output_path: Some(out_path.clone()),
+        }))
+        .expect("save_document");
+    let doc =
+        rhwp::parser::hwpx::parse_hwpx(&std::fs::read(&out_path).unwrap()).expect("저장본 재파싱");
+    let table = doc.sections[section].paragraphs[para]
+        .controls
+        .iter()
+        .find_map(|c| match c {
+            rhwp::model::control::Control::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("저장본에서 표 소실");
+    let cell_para = &table.cells[0].paragraphs[0];
+    assert_eq!(cell_para.text, "셀서식테스트");
+    let inside = char_shape_at(&doc, cell_para, 1);
+    assert_eq!(inside.text_color, RED_BGR, "셀 범위 색");
+    assert!(inside.italic, "셀 범위 기울임");
+    let outside = char_shape_at(&doc, cell_para, 2);
+    assert_ne!(outside.text_color, RED_BGR, "셀 범위 밖까지 빨강");
+}
+
+/// rhwp 는 잘못된 색·빈 범위·범위 밖을 오류 없이 무시하므로 서버가 거부해야 한다.
+#[test]
+fn apply_char_format_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let call = |start: usize, end: usize, format: CharFormat| {
+        server.apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 0,
+            start,
+            end,
+            cell: None,
+            format,
+        }))
+    };
+    let red = || CharFormat {
+        text_color: Some("#FF0000".to_string()),
+        ..empty_format()
+    };
+    let cases: Vec<(&str, Result<String, rmcp::ErrorData>)> = vec![
+        (
+            "색 이름",
+            call(
+                0,
+                1,
+                CharFormat {
+                    text_color: Some("red".to_string()),
+                    ..empty_format()
+                },
+            ),
+        ),
+        ("빈 서식", call(0, 1, empty_format())),
+        ("start == end", call(1, 1, red())),
+        ("end 가 문단 길이 초과", call(0, 100_000, red())),
+        (
+            "장평 범위 밖",
+            call(
+                0,
+                1,
+                CharFormat {
+                    ratio_percent: Some(10),
+                    ..empty_format()
+                },
+            ),
+        ),
+        (
+            "위/아래첨자 동시",
+            call(
+                0,
+                1,
+                CharFormat {
+                    superscript: Some(true),
+                    subscript: Some(true),
+                    ..empty_format()
+                },
+            ),
+        ),
+    ];
+    for (label, result) in cases {
+        let err = result.expect_err(label);
+        assert_eq!(
+            err.code,
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "{label}: {err:?}"
+        );
+    }
+
+    // 거부된 호출은 문서를 바꾸지 않아야 한다.
+    let docs: Value = serde_json::from_str(&server.list_documents().unwrap()).unwrap();
+    assert_eq!(docs[0]["dirty"].as_bool(), Some(false), "{docs}");
 }
