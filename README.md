@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (48)
+## Tools (49)
 
 **Session**
 
@@ -74,7 +74,7 @@ place in every tool.
 
 | Tool | Description |
 |------|-------------|
-| `get_structure(doc_id)` | Section → paragraph indices, previews, table control positions |
+| `get_structure(doc_id)` | Section → paragraph indices, previews, table control positions, and `objects` (table/picture/shape/equation/footnote/endnote with `control`, `kind`, `char_offset`) |
 | `get_text(doc_id, section, para_start?, para_end?)` | Full paragraph text |
 | `get_table(doc_id, section, para, control)` | Table size plus per-cell `cell_idx`/`row`/`col`/text |
 
@@ -134,6 +134,7 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 | Tool | Description |
 |------|-------------|
 | `insert_picture(doc_id, section, para, char_offset, image_path, width_mm?, height_mm?, inline?, x_mm?, y_mm?, description?)` | Insert a PNG/JPEG/GIF/BMP/TIFF picture into a body paragraph. One size given keeps the aspect ratio; none uses the 96 DPI natural size. `inline=true` (default) treats it as a character; `inline=false` floats it at `x_mm`/`y_mm` from the paper corner (default: body top-left) |
+| `delete_object(doc_id, section, para, control)` | Delete one object listed in `get_structure` `objects`: table, picture, shape, equation, footnote or endnote. Deleting a note renumbers the following ones |
 
 **Notes, header and footer**
 

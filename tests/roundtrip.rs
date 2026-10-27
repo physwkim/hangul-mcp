@@ -13,10 +13,10 @@ use hangul_mcp::server::{
     GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
     HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeParagraphParams, MergeTableCellsParams, NoteKind, OpenDocumentParams, ParaParams,
-    ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams, SetCellTextParams,
-    SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SplitParagraphParams,
-    SplitTableCellParams, StyleRef,
+    MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
+    ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
+    SetCellTextParams, SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams,
+    SplitParagraphParams, SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -2980,4 +2980,135 @@ fn text_editing_in_table_cell_rejects_past_cell_paragraph_end() {
     for (ext, doc) in save_both(&server, &doc_id, "cell_edit_reject") {
         assert_eq!(cell_paras(&doc, para, control, cell), ["가나"], "{ext}");
     }
+}
+
+fn structure(server: &HangulMcp, doc_id: &str) -> Value {
+    serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.to_string(),
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// get_structure 문단 para 의 objects 를 (control, kind, char_offset) 로.
+fn objects(server: &HangulMcp, doc_id: &str, para: usize) -> Vec<(usize, String, usize)> {
+    structure(server, doc_id)["sections"][0]["paragraphs"][para]["objects"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|o| {
+                    (
+                        o["control"].as_u64().unwrap() as usize,
+                        o["kind"].as_str().unwrap().to_string(),
+                        o["char_offset"].as_u64().unwrap() as usize,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn delete_object(
+    server: &HangulMcp,
+    doc_id: &str,
+    para: usize,
+    control: usize,
+) -> Result<String, rmcp::ErrorData> {
+    server.delete_object(Parameters(ObjectAtParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+    }))
+}
+
+/// 각주 둘과 글자처럼 취급한 그림: get_structure 가 문서 위치와 함께 알리고,
+/// delete_object 는 각주 번호를 다시 매기며 본문 텍스트를 건드리지 않는다.
+#[test]
+fn delete_object_footnote_and_picture_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    for (offset, text) in [(2, "앞"), (8, "뒤")] {
+        server
+            .insert_note(Parameters(note_params(&doc_id, offset, text, None)))
+            .unwrap();
+    }
+    let (png, _) = sample_png("delete_object.png");
+    let mut pic = picture_params(&doc_id, &png);
+    pic.char_offset = 5;
+    server.insert_picture(Parameters(pic)).unwrap();
+
+    let objs = objects(&server, &doc_id, 0);
+    let kinds: Vec<_> = objs.iter().map(|(_, k, o)| (k.as_str(), *o)).collect();
+    assert_eq!(
+        kinds,
+        [("footnote", 2), ("picture", 5), ("footnote", 8)],
+        "{objs:?}"
+    );
+
+    delete_object(&server, &doc_id, 0, objs[0].0).expect("delete footnote");
+    let picture = objects(&server, &doc_id, 0)
+        .into_iter()
+        .find(|(_, k, _)| k == "picture")
+        .unwrap();
+    delete_object(&server, &doc_id, 0, picture.0).expect("delete picture");
+
+    for (ext, doc) in save_both(&server, &doc_id, "delete_object") {
+        assert_eq!(notes(&doc), [("footnote", 1, "  뒤".to_string())], "{ext}");
+        assert!(pictures(&doc).is_empty(), "{ext}: 그림이 남음");
+        assert_eq!(
+            doc.sections[0].paragraphs[0].text, "안녕 Hello 123",
+            "{ext} 본문 텍스트"
+        );
+    }
+}
+
+#[test]
+fn delete_object_table_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (para, control) = create_table(&server, &doc_id, 2, 2);
+    assert_eq!(
+        objects(&server, &doc_id, para)
+            .iter()
+            .map(|(c, k, _)| (*c, k.as_str()))
+            .collect::<Vec<_>>(),
+        [(control, "table")]
+    );
+    delete_object(&server, &doc_id, para, control).expect("delete table");
+    for (ext, doc) in save_both(&server, &doc_id, "delete_table") {
+        let tables = doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .filter(|c| matches!(c, rhwp::model::control::Control::Table(_)))
+            .count();
+        assert_eq!(tables, 0, "{ext}: 표가 남음");
+    }
+}
+
+/// 구역 정의 같은 비개체 컨트롤이나 없는 컨트롤은 지우지 않는다.
+#[test]
+fn delete_object_rejects_non_objects() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let controls_total = structure(&server, &doc_id)["sections"][0]["paragraphs"][0]
+        ["controls_total"]
+        .as_u64()
+        .unwrap_or(0) as usize;
+    assert!(
+        controls_total > 0,
+        "문단 0 에 구역 정의 컨트롤이 있어야 한다"
+    );
+    assert!(objects(&server, &doc_id, 0).is_empty());
+    for control in 0..=controls_total {
+        assert!(
+            delete_object(&server, &doc_id, 0, control).is_err(),
+            "컨트롤 {control} 이 지워짐"
+        );
+    }
+    assert!(delete_object(&server, &doc_id, 99, 0).is_err());
 }

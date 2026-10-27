@@ -118,6 +118,44 @@ fn split_offset(
     Ok(char_offset + slots_before)
 }
 
+/// get_structure 가 `objects` 로 알리고 delete_object 가 지우는 개체 갈래 — 두 도구가 이
+/// 한 집합을 쓴다. 갈래마다 rhwp 삭제 경로가 달라(각주 번호 재매김, 그림의 누름틀 범위 보정 등)
+/// 범용 `delete_control_native` 대신 갈래별 native 로 보낸다.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ObjectKind {
+    Table,
+    Picture,
+    Shape,
+    Equation,
+    Footnote,
+    Endnote,
+}
+
+impl ObjectKind {
+    fn of(control: &Control) -> Option<Self> {
+        Some(match control {
+            Control::Table(_) => Self::Table,
+            Control::Picture(_) => Self::Picture,
+            Control::Shape(_) => Self::Shape,
+            Control::Equation(_) => Self::Equation,
+            Control::Footnote(_) => Self::Footnote,
+            Control::Endnote(_) => Self::Endnote,
+            _ => return None,
+        })
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::Picture => "picture",
+            Self::Shape => "shape",
+            Self::Equation => "equation",
+            Self::Footnote => "footnote",
+            Self::Endnote => "endnote",
+        }
+    }
+}
+
 /// 머리말/꼬리말 text 의 자리표시자와 rhwp 필드 종류(insert_field_in_hf_native) / 저장 문자.
 const HF_FIELDS: [(&str, u8, char); 3] = [
     ("{page}", 1, '\u{0015}'),
@@ -728,6 +766,18 @@ pub struct FormAtParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct ObjectAtParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+    /// 문단 인덱스 (0-기반)
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스 (get_structure objects 의 control 값)
+    pub control: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct SetFormValueParams {
     /// 문서 핸들
     pub doc_id: String,
@@ -1011,7 +1061,7 @@ impl HangulMcp {
     // ── 읽기 ──
 
     #[tool(
-        description = "문서 구조를 반환한다: 구역별 문단 목록(인덱스, 텍스트 미리보기, 표 컨트롤). 편집 좌표(section/para/control)를 파악하는 시작점."
+        description = "문서 구조를 반환한다: 구역별 문단 목록(인덱스, 텍스트 미리보기, 표 컨트롤, 개체 objects: 표/그림/도형/수식/각주/미주의 control·kind·char_offset). 편집 좌표(section/para/control)를 파악하는 시작점."
     )]
     pub fn get_structure(
         &self,
@@ -1045,6 +1095,21 @@ impl HangulMcp {
                                     _ => None,
                                 })
                                 .collect();
+                            let objects: Vec<_> = para
+                                .controls
+                                .iter()
+                                .zip(para.control_text_positions())
+                                .enumerate()
+                                .filter_map(|(ctrl_idx, (ctrl, pos))| {
+                                    ObjectKind::of(ctrl).map(|kind| {
+                                        json!({
+                                            "control": ctrl_idx,
+                                            "kind": kind.name(),
+                                            "char_offset": pos,
+                                        })
+                                    })
+                                })
+                                .collect();
                             let mut entry = json!({
                                 "para": para_idx,
                                 "preview": preview,
@@ -1055,6 +1120,9 @@ impl HangulMcp {
                             }
                             if !tables.is_empty() {
                                 entry["tables"] = json!(tables);
+                            }
+                            if !objects.is_empty() {
+                                entry["objects"] = json!(objects);
                             }
                             if !para.controls.is_empty() {
                                 entry["controls_total"] = json!(para.controls.len());
@@ -1825,6 +1893,50 @@ impl HangulMcp {
     }
 
     // ── 개체 삽입 ──
+
+    #[tool(
+        description = "본문 문단의 개체(표/그림/도형/수식/각주/미주) 하나를 지운다. control은 get_structure objects의 control 값. 각주/미주를 지우면 뒤 번호가 당겨진다."
+    )]
+    pub fn delete_object(
+        &self,
+        Parameters(p): Parameters<ObjectAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let ctrl = paragraph_at(session.core.document(), p.section, p.para, None)?
+                .controls
+                .get(p.control)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!(
+                            "문단 {}/{} 에 컨트롤 {} 이 없다",
+                            p.section, p.para, p.control
+                        ),
+                        None,
+                    )
+                })?;
+            let kind = ObjectKind::of(ctrl).ok_or_else(|| {
+                ErrorData::invalid_params(
+                    format!(
+                        "컨트롤 {} 은 지울 수 있는 개체(표/그림/도형/수식/각주/미주)가 아니다",
+                        p.control
+                    ),
+                    None,
+                )
+            })?;
+            let core = &mut session.core;
+            let (s, para, c) = (p.section, p.para, p.control);
+            match kind {
+                ObjectKind::Table => core.delete_table_control_native(s, para, c),
+                ObjectKind::Picture => core.delete_picture_control_native(s, para, c),
+                ObjectKind::Shape => core.delete_shape_control_native(s, para, c),
+                ObjectKind::Equation => core.delete_equation_control_native(s, para, c),
+                ObjectKind::Footnote | ObjectKind::Endnote => {
+                    core.delete_footnote_native(s, para, c)
+                }
+            }
+            .map_err(hwp_err)
+        })
+    }
 
     #[tool(
         description = "본문 문단의 char_offset 위치에 그림 파일(PNG/JPEG/GIF/BMP/TIFF)을 넣는다. 크기는 width_mm/height_mm(하나만 주면 비율 유지, 생략 시 원본 96 DPI). inline=true(기본)면 글자처럼 취급, false면 x_mm/y_mm 위치(용지 기준)에 떠 있는 그림."
