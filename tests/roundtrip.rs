@@ -10,10 +10,10 @@ use hangul_mcp::format::{
 use hangul_mcp::server::{
     ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, CreateTableParams, DocIdParams,
     FieldByNameParams, FitTableToPageParams, FormAtParams, GetCharFormatParams, GetTableParams,
-    HangulMcp, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams, ReplaceTextParams,
-    SaveDocumentParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
-    SplitParagraphParams, SplitTableCellParams, StyleRef,
+    HangulMcp, InsertPictureParams, InsertTableColumnParams, InsertTableRowParams,
+    InsertTextParams, MergeTableCellsParams, OpenDocumentParams, ParaParams, ParaTargetParams,
+    ReplaceTextParams, SaveDocumentParams, SetCellTextParams, SetFieldValueParams,
+    SetFormValueParams, SplitParagraphParams, SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -1699,4 +1699,185 @@ fn table_tools_reject_invalid_input() {
         unmerge_plain.is_err(),
         "병합되지 않은 셀의 병합 해제는 거부돼야 함"
     );
+}
+
+/// 40×20 px PNG 를 임시 파일로 만든다 (가로:세로 = 2:1).
+fn sample_png(name: &str) -> (String, Vec<u8>) {
+    let img = image::RgbImage::from_fn(40, 20, |x, _| image::Rgb([(x * 6) as u8, 0, 200]));
+    let path = temp_out(name);
+    img.save(&path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    (path, bytes)
+}
+
+fn picture_params(doc_id: &str, image_path: &str) -> InsertPictureParams {
+    InsertPictureParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para: 0,
+        char_offset: 0,
+        image_path: image_path.to_string(),
+        width_mm: None,
+        height_mm: None,
+        inline: None,
+        x_mm: None,
+        y_mm: None,
+        description: None,
+    }
+}
+
+fn pictures(doc: &rhwp::model::document::Document) -> Vec<&rhwp::model::image::Picture> {
+    doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .filter_map(|c| match c {
+            rhwp::model::control::Control::Picture(p) => Some(p.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn single_picture<'a>(
+    ext: &str,
+    doc: &'a rhwp::model::document::Document,
+) -> &'a rhwp::model::image::Picture {
+    let pics = pictures(doc);
+    assert_eq!(pics.len(), 1, "{ext} 그림 수");
+    pics[0]
+}
+
+fn assert_picture_bytes(
+    ext: &str,
+    doc: &rhwp::model::document::Document,
+    pic: &rhwp::model::image::Picture,
+    png: &[u8],
+) {
+    let content = doc
+        .bin_data_content
+        .iter()
+        .find(|c| c.id == pic.image_attr.bin_data_id)
+        .unwrap_or_else(|| panic!("{ext} 그림 BinData {} 없음", pic.image_attr.bin_data_id));
+    assert_eq!(content.data.load(), png, "{ext} 그림 바이트가 원본과 다름");
+}
+
+/// 기본(inline): 폭만 주면 비율이 유지되고 글자처럼 취급돼야 한다.
+#[test]
+fn insert_picture_inline_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (png_path, png) = sample_png("inline.png");
+    server
+        .insert_picture(Parameters(InsertPictureParams {
+            width_mm: Some(40.0),
+            description: Some("샘플 그림".to_string()),
+            ..picture_params(&doc_id, &png_path)
+        }))
+        .expect("insert_picture");
+
+    let w = (40.0_f64 * 7200.0 / 25.4).round() as u32;
+    for (ext, doc) in save_both(&server, &doc_id, "picture_inline") {
+        let pic = single_picture(ext, &doc);
+        assert!(pic.common.treat_as_char, "{ext} 글자처럼 취급 아님");
+        assert_eq!(pic.common.width, w, "{ext} 폭");
+        assert!(
+            pic.common.height.abs_diff(w / 2) <= 1,
+            "{ext} 높이 {} 가 폭의 절반 {} 이 아님",
+            pic.common.height,
+            w / 2
+        );
+        assert_eq!(pic.common.description, "샘플 그림", "{ext} 설명");
+        assert_picture_bytes(ext, &doc, pic, &png);
+    }
+}
+
+/// inline=false 이고 위치를 생략하면 본문 영역 왼쪽 위(용지 기준)에 떠 있어야 하고,
+/// 크기를 생략하면 96 DPI 원본 크기(px × 75 HWPUNIT)여야 한다.
+#[test]
+fn insert_picture_floating_defaults_to_body_origin() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (png_path, png) = sample_png("floating.png");
+    server
+        .insert_picture(Parameters(InsertPictureParams {
+            inline: Some(false),
+            ..picture_params(&doc_id, &png_path)
+        }))
+        .expect("insert_picture");
+
+    for (ext, doc) in save_both(&server, &doc_id, "picture_floating") {
+        let body =
+            rhwp::model::page::PageAreas::from_page_def(&doc.sections[0].section_def.page_def)
+                .body_area;
+        let pic = single_picture(ext, &doc);
+        assert!(!pic.common.treat_as_char, "{ext} 떠 있는 그림이어야 함");
+        assert_eq!(
+            (pic.common.horizontal_offset, pic.common.vertical_offset),
+            (body.left as u32, body.top as u32),
+            "{ext} 위치가 본문 왼쪽 위가 아님"
+        );
+        assert_eq!(
+            (pic.common.width, pic.common.height),
+            (40 * 75, 20 * 75),
+            "{ext} 원본 크기"
+        );
+        assert_picture_bytes(ext, &doc, pic, &png);
+    }
+}
+
+#[test]
+fn insert_picture_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (png_path, _) = sample_png("reject.png");
+    let cases = [
+        (
+            "그림이 아닌 파일",
+            picture_params(&doc_id, &fixture("ref_text.hwpx")),
+        ),
+        (
+            "없는 파일",
+            picture_params(&doc_id, &temp_out("no_such.png")),
+        ),
+        (
+            "폭 0",
+            InsertPictureParams {
+                width_mm: Some(0.0),
+                ..picture_params(&doc_id, &png_path)
+            },
+        ),
+        (
+            "높이 NaN",
+            InsertPictureParams {
+                height_mm: Some(f64::NAN),
+                ..picture_params(&doc_id, &png_path)
+            },
+        ),
+        (
+            "inline 에 위치 지정",
+            InsertPictureParams {
+                x_mm: Some(10.0),
+                ..picture_params(&doc_id, &png_path)
+            },
+        ),
+        (
+            "문단 범위 초과",
+            InsertPictureParams {
+                para: 999,
+                ..picture_params(&doc_id, &png_path)
+            },
+        ),
+    ];
+    for (label, params) in cases {
+        assert!(
+            server.insert_picture(Parameters(params)).is_err(),
+            "{label}: 거부돼야 함"
+        );
+    }
+    for (ext, doc) in save_both(&server, &doc_id, "picture_rejected") {
+        assert!(
+            pictures(&doc).is_empty(),
+            "{ext}: 거부된 호출이 그림을 남김"
+        );
+    }
 }

@@ -15,13 +15,19 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
-use crate::format::{paragraph_at, CellTarget, CharFormat, ParaFormat};
+use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
 const PREVIEW_CHARS: usize = 80;
+/// 그림 크기·위치(mm)의 상한. HWP 용지 최대 크기보다 넉넉하게 잡는다.
+const MAX_PAPER_MM: f64 = 2000.0;
+
+fn mm_to_hu(mm: f64) -> f64 {
+    mm * 7200.0 / 25.4
+}
 
 #[derive(Clone)]
 pub struct HangulMcp {
@@ -350,6 +356,32 @@ pub struct SplitTableCellParams {
     pub rows: Option<u16>,
     /// 나눌 칸 수. rows/cols를 모두 생략하면 병합만 해제한다
     pub cols: Option<u16>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertPictureParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 그림을 넣을 본문 문단 인덱스
+    pub para: usize,
+    /// 문단 내 삽입 위치 (char 단위)
+    pub char_offset: usize,
+    /// 그림 파일의 절대 경로 (PNG/JPEG/GIF/BMP/TIFF)
+    pub image_path: String,
+    /// 그림 폭 (mm). 생략하면 height_mm 비율 또는 원본 크기(96 DPI)
+    pub width_mm: Option<f64>,
+    /// 그림 높이 (mm). 생략하면 width_mm 비율 또는 원본 크기(96 DPI)
+    pub height_mm: Option<f64>,
+    /// true(기본)면 글자처럼 취급해 문장 흐름 안에 놓고, false면 쪽 기준 떠 있는 그림으로 놓는다
+    pub inline: Option<bool>,
+    /// 떠 있는 그림의 가로 위치 (용지 왼쪽에서 mm, inline=false일 때만). 생략 시 본문 왼쪽
+    pub x_mm: Option<f64>,
+    /// 떠 있는 그림의 세로 위치 (용지 위쪽에서 mm, inline=false일 때만). 생략 시 본문 위쪽
+    pub y_mm: Option<f64>,
+    /// 그림 설명(대체 텍스트)
+    pub description: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1312,6 +1344,127 @@ impl HangulMcp {
                 .core
                 .delete_table_column_native(p.section, p.para, p.control, p.col)
                 .map_err(hwp_err)
+        })
+    }
+
+    // ── 개체 삽입 ──
+
+    #[tool(
+        description = "본문 문단의 char_offset 위치에 그림 파일(PNG/JPEG/GIF/BMP/TIFF)을 넣는다. 크기는 width_mm/height_mm(하나만 주면 비율 유지, 생략 시 원본 96 DPI). inline=true(기본)면 글자처럼 취급, false면 x_mm/y_mm 위치(용지 기준)에 떠 있는 그림."
+    )]
+    pub fn insert_picture(
+        &self,
+        Parameters(p): Parameters<InsertPictureParams>,
+    ) -> Result<String, ErrorData> {
+        let inline = p.inline.unwrap_or(true);
+        for (name, v) in [("width_mm", p.width_mm), ("height_mm", p.height_mm)] {
+            if let Some(v) = v {
+                check_range(name, v, 0.1, MAX_PAPER_MM)?;
+            }
+        }
+        for (name, v) in [("x_mm", p.x_mm), ("y_mm", p.y_mm)] {
+            if let Some(v) = v {
+                check_range(name, v, 0.0, MAX_PAPER_MM)?;
+            }
+        }
+        if inline && (p.x_mm.is_some() || p.y_mm.is_some()) {
+            return Err(ErrorData::invalid_params(
+                "x_mm/y_mm은 inline=false일 때만 쓸 수 있음",
+                None,
+            ));
+        }
+        let data = std::fs::read(&p.image_path).map_err(|e| io_err(&p.image_path, e))?;
+        let reader = image::ImageReader::new(std::io::Cursor::new(&data))
+            .with_guessed_format()
+            .map_err(|e| io_err(&p.image_path, e))?;
+        let extension = match reader.format() {
+            Some(image::ImageFormat::Png) => "png",
+            Some(image::ImageFormat::Jpeg) => "jpg",
+            Some(image::ImageFormat::Gif) => "gif",
+            Some(image::ImageFormat::Bmp) => "bmp",
+            Some(image::ImageFormat::Tiff) => "tif",
+            other => {
+                return Err(ErrorData::invalid_params(
+                    format!("지원하지 않는 그림 형식: {other:?} (PNG/JPEG/GIF/BMP/TIFF만)"),
+                    None,
+                ))
+            }
+        };
+        let (px_w, px_h) = reader.into_dimensions().map_err(|e| {
+            ErrorData::invalid_params(format!("그림 크기를 읽을 수 없음: {e}"), None)
+        })?;
+        // 96 DPI 기준 1px = 75 HWPUNIT
+        let (nat_w, nat_h) = (f64::from(px_w) * 75.0, f64::from(px_h) * 75.0);
+        let (width, height) = match (p.width_mm.map(mm_to_hu), p.height_mm.map(mm_to_hu)) {
+            (Some(w), Some(h)) => (w, h),
+            (Some(w), None) => (w, w * nat_h / nat_w),
+            (None, Some(h)) => (h * nat_w / nat_h, h),
+            (None, None) => (nat_w, nat_h),
+        };
+        let (width, height) = (
+            width.round().max(1.0) as u32,
+            height.round().max(1.0) as u32,
+        );
+
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let section = session
+                .core
+                .document()
+                .sections
+                .get(p.section)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(format!("구역 {} 없음", p.section), None)
+                })?;
+            let (x, y) = if inline {
+                (None, None)
+            } else {
+                let body =
+                    rhwp::model::page::PageAreas::from_page_def(&section.section_def.page_def)
+                        .body_area;
+                (
+                    Some(p.x_mm.map_or(body.left, |v| mm_to_hu(v).round() as i32)),
+                    Some(p.y_mm.map_or(body.top, |v| mm_to_hu(v).round() as i32)),
+                )
+            };
+            let out = session
+                .core
+                .insert_picture_native(
+                    p.section,
+                    p.para,
+                    p.char_offset,
+                    &[],
+                    &data,
+                    width,
+                    height,
+                    px_w,
+                    px_h,
+                    extension,
+                    p.description.as_deref().unwrap_or(""),
+                    x,
+                    y,
+                )
+                .map_err(hwp_err)?;
+            if inline {
+                let v: Value = serde_json::from_str(&out).map_err(|e| {
+                    ErrorData::internal_error(format!("insert_picture 결과 해석 실패: {e}"), None)
+                })?;
+                let ctrl = v["controlIdx"].as_u64().ok_or_else(|| {
+                    ErrorData::internal_error(
+                        format!("insert_picture 결과에 controlIdx 없음: {out}"),
+                        None,
+                    )
+                })? as usize;
+                session
+                    .core
+                    .set_picture_properties_native(
+                        p.section,
+                        p.para,
+                        ctrl,
+                        r#"{"treatAsChar":true}"#,
+                    )
+                    .map_err(hwp_err)?;
+            }
+            Ok(out)
         })
     }
 

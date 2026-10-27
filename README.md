@@ -52,7 +52,7 @@ MCP protocol over stdio and takes no arguments.
 All coordinates are 0-based and character positions are counted in `char` units.
 This is the same coordinate system rhwp's `DocumentCore` uses.
 
-## Tools (39)
+## Tools (40)
 
 **Session**
 
@@ -118,6 +118,12 @@ This is the same coordinate system rhwp's `DocumentCore` uses.
 | `set_table_column_widths(doc_id, section, para, control, widths)` | Set per-column widths directly |
 | `merge_table_cells(doc_id, section, para, control, start_row, start_col, end_row, end_col)` | Merge a rectangular cell range (inclusive) |
 | `split_table_cell(doc_id, section, para, control, row, col, rows?, cols?)` | Unmerge a merged cell, or split a cell into `rows`×`cols` |
+
+**Objects**
+
+| Tool | Description |
+|------|-------------|
+| `insert_picture(doc_id, section, para, char_offset, image_path, width_mm?, height_mm?, inline?, x_mm?, y_mm?, description?)` | Insert a PNG/JPEG/GIF/BMP/TIFF picture into a body paragraph. One size given keeps the aspect ratio; none uses the 96 DPI natural size. `inline=true` (default) treats it as a character; `inline=false` floats it at `x_mm`/`y_mm` from the paper corner (default: body top-left) |
 
 **Fields (누름틀)** — filling in form documents
 

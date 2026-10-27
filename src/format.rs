@@ -93,7 +93,7 @@ fn check_color(key: &str, value: &str) -> Result<(), ErrorData> {
     }
 }
 
-fn check_range<T: PartialOrd + std::fmt::Display>(
+pub(crate) fn check_range<T: PartialOrd + std::fmt::Display>(
     key: &str,
     value: T,
     min: T,
