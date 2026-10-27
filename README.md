@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (66)
+## Tools (69)
 
 **Session**
 
@@ -148,6 +148,8 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 | `insert_picture(doc_id, section, para, char_offset, image_path, width_mm?, height_mm?, inline?, x_mm?, y_mm?, description?)` | Insert a PNG/JPEG/GIF/BMP/TIFF picture into a body paragraph. One size given keeps the aspect ratio; none uses the 96 DPI natural size. `inline=true` (default) treats it as a character; `inline=false` floats it at `x_mm`/`y_mm` from the paper corner (default: body top-left) |
 | `get_picture_format(doc_id, section, para, control)` | Picture format → the table placement fields (`inline`, `text_wrap`, `horz/vert_rel_to`, `horz/vert_align`, `*_offset_mm`, outer `margin_*_mm`), `width_mm`/`height_mm`, `description`, `brightness`, `contrast`, `transparency`, `effect`, `rotation_deg`, `horz_flip`/`vert_flip` — the same shape as the `format` input of `apply_picture_format` |
 | `apply_picture_format(doc_id, section, para, control, format)` | Apply only the given fields of a picture format. Pictures also take `text_wrap` `tight`/`through` (kept in HWPX; HWP 5.0 has no such wrap, so a `.hwp` save writes `square`) but not `inside`/`outside` alignment |
+| `insert_equation(doc_id, section, para, char_offset, script, font_size_pt?, color?)` | Insert an equation, treated as a character, from a Hangul equation script (`1 over 2`, `x^2`, `sqrt {a+b}`, `sum from {i=1} to n`). Size is computed from the script; default 10 pt black |
+| `get_equation(doc_id, section, para, control, cell?)` / `set_equation(..., script?, font_size_pt?, color?)` | Read / change an equation's script, size and color; a new script or size recomputes its box. In a table cell only the first equation of the cell paragraph can be changed (rhwp addresses cell equations without a control index) |
 | `delete_object(doc_id, section, para, control)` | Delete one object listed in `get_structure` `objects`: table, picture, shape, equation, footnote or endnote. Deleting a note renumbers the following ones |
 
 **Notes, header and footer**
@@ -208,7 +210,9 @@ cargo nextest run
 ```
 
 `tests/roundtrip.rs` asserts an open → edit → save → re-parse (`parse_hwpx`) round trip
-against the fixtures in `tests/fixtures/` (copied from rhwp's samples).
+against the fixtures in `tests/fixtures/` (copied from rhwp's samples; `equation_in_cell.hwpx` is
+rhwp's `issue7593/repro-equation-issue7593.hwpx` with a second equation (`z^2`) appended to the
+first cell paragraph that holds one).
 
 ## Out of scope (possible follow-ups)
 

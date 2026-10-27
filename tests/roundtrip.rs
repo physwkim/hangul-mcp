@@ -16,16 +16,17 @@ use hangul_mcp::placement::{
 use hangul_mcp::server::{
     AddBookmarkParams, ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams,
     ApplyPictureFormatParams, ApplyStyleParams, ApplyTableFormatParams, BookmarkNameParams,
-    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, ExportDocumentParams,
-    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
-    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
-    HeaderFooterPages, HeaderFooterParams, HyperlinkAtParams, InsertBreakParams,
-    InsertHyperlinkParams, InsertNoteParams, InsertPictureParams, InsertTableColumnParams,
-    InsertTableRowParams, InsertTextParams, MergeParagraphParams, MergeTableCellsParams, NoteKind,
-    ObjectAtParams, OpenDocumentParams, ParaParams, ParaTargetParams, RenameBookmarkParams,
-    RenderPageParams, ReplaceTextParams, SaveDocumentParams, SectionParams, SetCellTextParams,
-    SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams,
-    SplitParagraphParams, SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
+    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, EquationAtParams,
+    ExportDocumentParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
+    GetCellFormatParams, GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp,
+    HeaderFooterKind, HeaderFooterPages, HeaderFooterParams, HyperlinkAtParams, InsertBreakParams,
+    InsertEquationParams, InsertHyperlinkParams, InsertNoteParams, InsertPictureParams,
+    InsertTableColumnParams, InsertTableRowParams, InsertTextParams, MergeParagraphParams,
+    MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams, ParaParams,
+    ParaTargetParams, RenameBookmarkParams, RenderPageParams, ReplaceTextParams,
+    SaveDocumentParams, SectionParams, SetCellTextParams, SetEquationParams, SetFieldValueParams,
+    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams,
+    SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -4557,4 +4558,310 @@ fn para_starting_with(server: &HangulMcp, doc_id: &str, prefix: &str) -> usize {
         .unwrap_or_else(|| panic!("'{prefix}' 문단 없음: {out}"))["para"]
         .as_u64()
         .unwrap() as usize
+}
+
+fn insert_equation(
+    server: &HangulMcp,
+    doc_id: &str,
+    char_offset: usize,
+    script: &str,
+    font_size_pt: Option<f64>,
+    color: Option<&str>,
+) -> Result<(usize, usize), rmcp::ErrorData> {
+    server
+        .insert_equation(Parameters(InsertEquationParams {
+            doc_id: doc_id.to_string(),
+            section: 0,
+            para: 0,
+            char_offset,
+            script: script.to_string(),
+            font_size_pt,
+            color: color.map(str::to_string),
+        }))
+        .map(|out| {
+            let v: Value = serde_json::from_str(&out).unwrap();
+            (
+                v["para"].as_u64().unwrap() as usize,
+                v["control"].as_u64().unwrap() as usize,
+            )
+        })
+}
+
+fn get_equation(
+    server: &HangulMcp,
+    doc_id: &str,
+    para: usize,
+    cell: Option<CellTarget>,
+    control: usize,
+) -> Value {
+    serde_json::from_str(
+        &server
+            .get_equation(Parameters(EquationAtParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para,
+                cell,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn set_equation(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, cell, control): (usize, Option<CellTarget>, usize),
+    script: Option<&str>,
+    font_size_pt: Option<f64>,
+    color: Option<&str>,
+) -> Result<String, rmcp::ErrorData> {
+    server.set_equation(Parameters(SetEquationParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        cell,
+        control,
+        script: script.map(str::to_string),
+        font_size_pt,
+        color: color.map(str::to_string),
+    }))
+}
+
+/// 재파싱 문서의 본문 수식 (para, control).
+fn ir_equation(
+    doc: &rhwp::model::document::Document,
+    para: usize,
+    control: usize,
+) -> &rhwp::model::control::Equation {
+    match &doc.sections[0].paragraphs[para].controls[control] {
+        rhwp::model::control::Control::Equation(eq) => eq,
+        other => panic!("수식이 아님: {other:?}"),
+    }
+}
+
+/// 넣은 수식의 스크립트·크기·색이 조회와 HWPX/HWP 저장본에 남고, 스크립트를 바꾸면 폭이 다시 계산된다.
+#[test]
+fn equation_insert_and_set_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let at = insert_equation(
+        &server,
+        &doc_id,
+        1,
+        "x^2 + y^2 = r^2",
+        Some(12.0),
+        Some("#FF0000"),
+    )
+    .unwrap();
+    let want =
+        serde_json::json!({"script": "x^2 + y^2 = r^2", "font_size_pt": 12.0, "color": "#ff0000"});
+    assert_eq!(get_equation(&server, &doc_id, at.0, None, at.1), want);
+    let narrow = save_both(&server, &doc_id, "equation_insert");
+    for (ext, doc) in &narrow {
+        let eq = ir_equation(doc, at.0, at.1);
+        assert_eq!(
+            (eq.script.as_str(), eq.font_size, eq.color),
+            ("x^2 + y^2 = r^2", 1200, 0x0000FF),
+            "{ext}"
+        );
+        assert!(eq.common.treat_as_char, "{ext} 글자처럼 취급 아님");
+    }
+    let before_width = ir_equation(&narrow[0].1, at.0, at.1).common.width;
+
+    let long = "sum from {i=1} to n {a_i + b_i + c_i + d_i}";
+    set_equation(
+        &server,
+        &doc_id,
+        (at.0, None, at.1),
+        Some(long),
+        None,
+        Some("#0000ff"),
+    )
+    .unwrap();
+    let want = serde_json::json!({"script": long, "font_size_pt": 12.0, "color": "#0000ff"});
+    assert_eq!(get_equation(&server, &doc_id, at.0, None, at.1), want);
+    for (ext, doc) in save_both(&server, &doc_id, "equation_set") {
+        let eq = ir_equation(&doc, at.0, at.1);
+        assert_eq!((eq.script.as_str(), eq.color), (long, 0xFF0000), "{ext}");
+        assert!(
+            eq.common.width > before_width,
+            "{ext} 폭이 다시 계산되지 않음"
+        );
+    }
+}
+
+/// 표 셀 문단의 수식들: (para, cell 대상, control, 셀 문단의 첫 수식인지).
+fn cell_equations(server: &HangulMcp, doc_id: &str) -> Vec<(usize, CellTarget, usize, bool)> {
+    let path = temp_out(&format!("{doc_id}_eq_probe.hwpx"));
+    server
+        .save_document(Parameters(SaveDocumentParams {
+            doc_id: doc_id.to_string(),
+            output_path: Some(path.clone()),
+        }))
+        .unwrap();
+    let doc = rhwp::parser::hwpx::parse_hwpx(&std::fs::read(&path).unwrap()).unwrap();
+    let mut out = Vec::new();
+    for (pi, p) in doc.sections[0].paragraphs.iter().enumerate() {
+        for (ti, c) in p.controls.iter().enumerate() {
+            let rhwp::model::control::Control::Table(t) = c else {
+                continue;
+            };
+            for (cell, tc) in t.cells.iter().enumerate() {
+                for (cp, para) in tc.paragraphs.iter().enumerate() {
+                    let eqs: Vec<usize> = para
+                        .controls
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, c)| matches!(c, rhwp::model::control::Control::Equation(_)))
+                        .map(|(i, _)| i)
+                        .collect();
+                    for (n, &ci) in eqs.iter().enumerate() {
+                        let target = CellTarget {
+                            control: ti,
+                            cell,
+                            cell_para: Some(cp),
+                        };
+                        out.push((pi, target, ci, n == 0));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 셀 문단의 첫 수식은 바뀌어 저장되고, 첫 수식이 아니면 rhwp 가 다른 수식을 고치므로 거부한다.
+#[test]
+fn equation_in_table_cell() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("equation_in_cell.hwpx"));
+    let eqs = cell_equations(&server, &doc_id);
+    let &(para, ref cell, control, _) = eqs.iter().find(|e| e.3).expect("셀 문단 첫 수식");
+    let cell = || CellTarget {
+        control: cell.control,
+        cell: cell.cell,
+        cell_para: cell.cell_para,
+    };
+    set_equation(
+        &server,
+        &doc_id,
+        (para, Some(cell()), control),
+        Some("a over b"),
+        Some(15.0),
+        None,
+    )
+    .unwrap();
+    let got = get_equation(&server, &doc_id, para, Some(cell()), control);
+    assert_eq!(
+        (got["script"].as_str(), got["font_size_pt"].as_f64()),
+        (Some("a over b"), Some(15.0))
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "equation_cell") {
+        let rhwp::model::control::Control::Table(t) =
+            &doc.sections[0].paragraphs[para].controls[cell().control]
+        else {
+            panic!("{ext} 표 아님")
+        };
+        let rhwp::model::control::Control::Equation(eq) =
+            &t.cells[cell().cell].paragraphs[cell().cell_para()].controls[control]
+        else {
+            panic!("{ext} 수식 아님")
+        };
+        assert_eq!(
+            (eq.script.as_str(), eq.font_size),
+            ("a over b", 1500),
+            "{ext}"
+        );
+    }
+    // 픽스처는 첫 셀 수식 바로 뒤에 같은 셀 문단으로 둘째 수식(z^2)을 덧붙였다.
+    let (para, cell, control, _) = eqs.iter().find(|e| !e.3).expect("셀 문단의 둘째 수식");
+    let second = || CellTarget {
+        control: cell.control,
+        cell: cell.cell,
+        cell_para: cell.cell_para,
+    };
+    assert_eq!(
+        get_equation(&server, &doc_id, *para, Some(second()), *control)["script"],
+        "z^2"
+    );
+    assert!(set_equation(
+        &server,
+        &doc_id,
+        (*para, Some(second()), *control),
+        Some("w"),
+        None,
+        None
+    )
+    .is_err());
+}
+
+#[test]
+fn equation_tools_reject_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let len = para_text_of(&server, &doc_id, 0).chars().count();
+    for (what, offset, script, size, color) in [
+        ("빈 스크립트", 0, " ", None, None),
+        ("제어 문자", 0, "a\u{1}b", None, None),
+        ("크기 0", 0, "x", Some(0.0), None),
+        ("크기 초과", 0, "x", Some(2000.0), None),
+        ("색 형식", 0, "x", None, Some("red")),
+        ("문단 끝 너머", len + 1, "x", None, None),
+    ] {
+        assert!(
+            insert_equation(&server, &doc_id, offset, script, size, color).is_err(),
+            "{what}"
+        );
+    }
+    let at = insert_equation(&server, &doc_id, 0, "x", None, None).unwrap();
+    assert_eq!(
+        get_equation(&server, &doc_id, at.0, None, at.1)["font_size_pt"],
+        10.0
+    );
+    assert!(
+        set_equation(&server, &doc_id, (at.0, None, at.1), None, None, None).is_err(),
+        "바꿀 것 없음"
+    );
+    assert!(
+        set_equation(&server, &doc_id, (at.0, None, at.1), Some(""), None, None).is_err(),
+        "빈 스크립트"
+    );
+    assert!(
+        set_equation(
+            &server,
+            &doc_id,
+            (at.0, None, at.1 + 1),
+            Some("y"),
+            None,
+            None
+        )
+        .is_err(),
+        "수식 아닌 컨트롤"
+    );
+    undo(&server, &doc_id).expect("undo insert_equation");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 수식 편집이 기록을 남김"
+    );
+}
+
+/// delete_object 의 수식 갈래: 지운 수식이 저장본에서도 사라진다.
+#[test]
+fn delete_object_equation_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let text = para_text_of(&server, &doc_id, 0);
+    let at = insert_equation(&server, &doc_id, 2, "1 over 2", None, None).unwrap();
+    delete_object(&server, &doc_id, at.0, at.1).unwrap();
+    assert_eq!(para_text_of(&server, &doc_id, 0), text);
+    for (ext, doc) in save_both(&server, &doc_id, "equation_delete") {
+        let eqs = doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .filter(|c| matches!(c, rhwp::model::control::Control::Equation(_)))
+            .count();
+        assert_eq!(eqs, 0, "{ext}");
+    }
 }

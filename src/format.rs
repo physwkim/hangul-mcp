@@ -108,6 +108,12 @@ pub(crate) fn check_range<T: PartialOrd + std::fmt::Display>(
     Ok(())
 }
 
+/// `check_color` 를 통과한 "#RRGGBB" → HWP 색 (0x00BBGGRR).
+pub(crate) fn color_bgr(css: &str) -> u32 {
+    let v = u32::from_str_radix(&css[1..], 16).expect("check_color 를 거친 값");
+    ((v & 0xFF) << 16) | (v & 0xFF00) | (v >> 16)
+}
+
 /// HWP ColorRef(0x00BBGGRR) → "#rrggbb".
 pub(crate) fn color_css(c: u32) -> String {
     format!(

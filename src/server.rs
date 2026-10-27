@@ -20,7 +20,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::cell_format::CellFormat;
-use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
+use crate::format::{
+    check_color, check_range, color_bgr, color_css, paragraph_at, CellTarget, CharFormat,
+    ParaFormat,
+};
 use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
 use crate::placement::{PictureFormat, TableFormat};
 use crate::store::DocumentStore;
@@ -447,6 +450,61 @@ fn body_bookmark(doc: &Document, name: &str) -> Result<(usize, usize, usize), Er
     }
 }
 
+/// 본문 문단, 또는 cell 이면 그 표 셀 문단의 수식.
+fn equation_at<'a>(
+    doc: &'a Document,
+    section: usize,
+    para: usize,
+    cell: Option<&CellTarget>,
+    control: usize,
+) -> Result<&'a rhwp::model::control::Equation, ErrorData> {
+    match paragraph_at(doc, section, para, cell)?
+        .controls
+        .get(control)
+    {
+        Some(Control::Equation(eq)) => Ok(eq),
+        _ => Err(ErrorData::invalid_params(
+            format!("문단 {section}/{para} 의 컨트롤 {control} 은 수식이 아니다"),
+            None,
+        )),
+    }
+}
+
+fn equation_json(eq: &rhwp::model::control::Equation) -> Value {
+    json!({
+        "script": eq.script,
+        "font_size_pt": f64::from(eq.font_size) / 100.0,
+        "color": color_css(eq.color),
+    })
+}
+
+/// 수식 스크립트와 글자 크기·색을 검사해 rhwp 값(HWPUNIT, 0x00BBGGRR)으로 바꾼다.
+/// rhwp 속성 JSON 의 문자열 해석은 \n·\r·\t 외의 이스케이프를 풀지 않는다.
+fn check_equation(
+    script: Option<&str>,
+    font_size_pt: Option<f64>,
+    color: Option<&str>,
+) -> Result<(Option<u32>, Option<u32>), ErrorData> {
+    if let Some(s) = script {
+        if s.trim().is_empty()
+            || s.chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Err(ErrorData::invalid_params(
+                "script 는 비어 있지 않아야 하고 줄바꿈·탭 외의 제어 문자를 쓸 수 없다",
+                None,
+            ));
+        }
+    }
+    let size = font_size_pt
+        .map(|v| check_range("font_size_pt", v, 1.0, 1000.0).map(|_| (v * 100.0).round() as u32))
+        .transpose()?;
+    let color = color
+        .map(|c| check_color("color", c).map(|_| color_bgr(c)))
+        .transpose()?;
+    Ok((size, color))
+}
+
 /// 본문 문단 (section, para) 의 컨트롤 control 인 표.
 fn table_at(
     doc: &Document,
@@ -656,6 +714,58 @@ pub struct UpdateHyperlinkParams {
     pub url: Option<String>,
     /// 새 표시 글자 (한 줄)
     pub text: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct InsertEquationParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스
+    pub para: usize,
+    /// 문단 내 삽입 위치 (char 단위)
+    pub char_offset: usize,
+    /// 한글 수식 스크립트 (예: "1 over 2", "x^2 + y^2 = r^2", "sqrt {a+b}")
+    pub script: String,
+    /// 글자 크기 (pt, 기본 10)
+    pub font_size_pt: Option<f64>,
+    /// 글자 색 "#RRGGBB" (기본 검정)
+    pub color: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct EquationAtParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
+    pub para: usize,
+    /// 표 셀 안 문단이면 그 셀
+    pub cell: Option<CellTarget>,
+    /// 문단(셀이면 셀 문단) 안 수식 컨트롤 인덱스
+    pub control: usize,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetEquationParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
+    pub para: usize,
+    /// 표 셀 안 문단이면 그 셀
+    pub cell: Option<CellTarget>,
+    /// 문단(셀이면 셀 문단) 안 수식 컨트롤 인덱스
+    pub control: usize,
+    /// 새 수식 스크립트
+    pub script: Option<String>,
+    /// 새 글자 크기 (pt)
+    pub font_size_pt: Option<f64>,
+    /// 새 글자 색 "#RRGGBB"
+    pub color: Option<String>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1755,6 +1865,127 @@ impl HangulMcp {
                 .remove_hyperlink_native(&target, p.field_id)
                 .map_err(hwp_err)?;
             Ok(json!({"removed": p.field_id}).to_string())
+        })
+    }
+
+    #[tool(
+        description = "본문 문단의 char_offset 위치에 수식을 글자처럼 넣는다. script 는 한글 수식 문법(예: \"1 over 2\", \"x^2\", \"sqrt {a+b}\", \"sum from {i=1} to n\"). 크기는 스크립트로 자동 계산된다."
+    )]
+    pub fn insert_equation(
+        &self,
+        Parameters(p): Parameters<InsertEquationParams>,
+    ) -> Result<String, ErrorData> {
+        let (size, color) = check_equation(
+            Some(&p.script),
+            Some(p.font_size_pt.unwrap_or(10.0)),
+            p.color.as_deref(),
+        )?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            check_offset(
+                &session.core,
+                p.section,
+                p.para,
+                None,
+                "char_offset",
+                p.char_offset,
+            )?;
+            let out = session
+                .core
+                .insert_equation_native(
+                    p.section,
+                    p.para,
+                    p.char_offset,
+                    &p.script,
+                    size.expect("기본 크기"),
+                    color.unwrap_or(0),
+                )
+                .map_err(hwp_err)?;
+            let v: Value = serde_json::from_str(&out).map_err(|e| {
+                ErrorData::internal_error(format!("insert_equation 결과 해석 실패: {e}"), None)
+            })?;
+            Ok(json!({"para": v["paraIdx"], "control": v["controlIdx"]}).to_string())
+        })
+    }
+
+    #[tool(
+        description = "수식의 script, font_size_pt, color 를 반환한다 (표 셀 안이면 cell). 위치는 get_structure objects 로 파악한다."
+    )]
+    pub fn get_equation(
+        &self,
+        Parameters(p): Parameters<EquationAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let eq = equation_at(
+                session.core.document(),
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                p.control,
+            )?;
+            Ok(equation_json(eq).to_string())
+        })
+    }
+
+    #[tool(
+        description = "수식의 script / font_size_pt / color 를 바꾼다 (지정한 것만). 스크립트나 크기를 바꾸면 수식 크기가 다시 계산된다. 표 셀 안(cell)은 그 셀 문단의 첫 수식만 바꿀 수 있다."
+    )]
+    pub fn set_equation(
+        &self,
+        Parameters(p): Parameters<SetEquationParams>,
+    ) -> Result<String, ErrorData> {
+        let (size, color) =
+            check_equation(p.script.as_deref(), p.font_size_pt, p.color.as_deref())?;
+        let mut props = serde_json::Map::new();
+        if let Some(s) = &p.script {
+            props.insert("script".into(), json!(s));
+        }
+        if let Some(v) = size {
+            props.insert("fontSize".into(), json!(v));
+        }
+        if let Some(v) = color {
+            props.insert("color".into(), json!(v));
+        }
+        if props.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "script / font_size_pt / color 중 하나는 있어야 한다",
+                None,
+            ));
+        }
+        let props = Value::Object(props).to_string();
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let doc = session.core.document();
+            equation_at(doc, p.section, p.para, p.cell.as_ref(), p.control)?;
+            // rhwp 는 셀 문단에서 컨트롤 번호 없이 첫 수식을 고친다.
+            let (table_ctrl, cell_idx, cell_para) = match &p.cell {
+                Some(c) => {
+                    let first = paragraph_at(doc, p.section, p.para, Some(c))?
+                        .controls
+                        .iter()
+                        .position(|ctrl| matches!(ctrl, Control::Equation(_)));
+                    if first != Some(p.control) {
+                        return Err(ErrorData::invalid_params(
+                            "표 셀 문단에서는 첫 수식만 바꿀 수 있다 (rhwp 제약)",
+                            None,
+                        ));
+                    }
+                    (c.control, Some(c.cell), Some(c.cell_para()))
+                }
+                None => (p.control, None, None),
+            };
+            session
+                .core
+                .set_equation_properties_native(
+                    p.section, p.para, table_ctrl, cell_idx, cell_para, &props,
+                )
+                .map_err(hwp_err)?;
+            let eq = equation_at(
+                session.core.document(),
+                p.section,
+                p.para,
+                p.cell.as_ref(),
+                p.control,
+            )?;
+            Ok(equation_json(eq).to_string())
         })
     }
 
