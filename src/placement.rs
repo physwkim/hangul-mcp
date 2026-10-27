@@ -1,10 +1,11 @@
 //! 개체 배치(글자처럼 취급·본문과의 배치·가로/세로 기준과 정렬·오프셋·바깥 여백)와 표 서식.
 //!
 //! 표와 그림은 rhwp 에서 같은 `CommonObjAttr` 배치 필드와 같은 속성 키(`treatAsChar`,
-//! `textWrap`, `horzRelTo` …)를 쓰므로 한 `Placement` 타입이 둘 다 맡는다. 바깥 여백 키만
-//! 개체마다 다르다(표 `outerLeft`, 그림 `outerMarginLeft`). rhwp 는 모르는 열거 문자열을 오류
-//! 없이 첫 값으로 바꾸므로 열거값은 여기서 타입으로 막는다.
+//! `textWrap`, `horzRelTo` …)를 쓰므로 한 `Placement` 타입이 둘 다 맡는다. 개체마다 다른 것
+//! (바깥 여백 키, rhwp 가 받는 열거값)은 `PlacementTarget` 하나에 모은다. rhwp 는 받지 않는
+//! 열거 문자열을 오류 없이 무시하거나 다른 값으로 바꾸므로 여기서 먼저 거부한다.
 
+use rhwp::model::image::{ImageEffect as RImageEffect, Picture};
 use rhwp::model::shape::{
     CommonObjAttr, HorzAlign as RHorzAlign, HorzRelTo as RHorzRelTo, TextWrap as RTextWrap,
     VertAlign as RVertAlign, VertRelTo as RVertRelTo,
@@ -82,6 +83,30 @@ pub enum VertAlign {
     Bottom,
     Inside,
     Outside,
+}
+
+/// 배치를 받는 개체. rhwp 의 개체별 속성 setter 가 받는 키와 값이 다르다:
+/// 표(`set_table_properties_native`)는 tight/through 배치를 모르고, 그림
+/// (`set_picture_properties_native`)은 inside/outside 정렬을 모른다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlacementTarget {
+    Table,
+    Picture,
+}
+
+impl PlacementTarget {
+    /// 바깥 여백 키 (왼, 오른, 위, 아래).
+    fn margin_keys(self) -> [&'static str; 4] {
+        match self {
+            Self::Table => ["outerLeft", "outerRight", "outerTop", "outerBottom"],
+            Self::Picture => [
+                "outerMarginLeft",
+                "outerMarginRight",
+                "outerMarginTop",
+                "outerMarginBottom",
+            ],
+        }
+    }
 }
 
 /// 개체 배치. 적용 시 지정한 항목만 바뀐다.
@@ -177,13 +202,11 @@ impl Placement {
         ]
     }
 
-    /// rhwp 속성 키로 옮긴다. `margin_keys` 는 개체의 바깥 여백 키 (왼, 오른, 위, 아래).
-    /// `allow_tight_through=false` 면 rhwp 가 받지 않는(어울림으로 바꾸는) 두 배치를 거부한다.
+    /// `target` 의 rhwp 속성 키로 옮긴다. 그 개체에 rhwp 가 받지 않는 값은 거부한다.
     fn put(
         &self,
         props: &mut Map<String, Value>,
-        margin_keys: [&str; 4],
-        allow_tight_through: bool,
+        target: PlacementTarget,
     ) -> Result<(), ErrorData> {
         if let Some(v) = self.inline {
             props.insert("treatAsChar".into(), json!(v));
@@ -191,9 +214,9 @@ impl Placement {
         if let Some(w) = self.text_wrap {
             let name = match w {
                 TextWrap::Square => "Square",
-                TextWrap::Tight | TextWrap::Through if !allow_tight_through => {
+                TextWrap::Tight | TextWrap::Through if target == PlacementTarget::Table => {
                     return Err(ErrorData::invalid_params(
-                        "이 개체의 text_wrap 은 square/top_and_bottom/behind_text/in_front_of_text 만 된다",
+                        "표의 text_wrap 은 square/top_and_bottom/behind_text/in_front_of_text 만 된다",
                         None,
                     ))
                 }
@@ -214,8 +237,17 @@ impl Placement {
             };
             props.insert("horzRelTo".into(), json!(name));
         }
+        let inside_outside = |name: &str| {
+            Err(ErrorData::invalid_params(
+                format!("그림의 {name} 은 inside/outside 를 쓸 수 없다"),
+                None,
+            ))
+        };
         if let Some(v) = self.horz_align {
             let name = match v {
+                HorzAlign::Inside | HorzAlign::Outside if target == PlacementTarget::Picture => {
+                    return inside_outside("horz_align")
+                }
                 HorzAlign::Left => "Left",
                 HorzAlign::Center => "Center",
                 HorzAlign::Right => "Right",
@@ -234,6 +266,9 @@ impl Placement {
         }
         if let Some(v) = self.vert_align {
             let name = match v {
+                VertAlign::Inside | VertAlign::Outside if target == PlacementTarget::Picture => {
+                    return inside_outside("vert_align")
+                }
                 VertAlign::Top => "Top",
                 VertAlign::Center => "Center",
                 VertAlign::Bottom => "Bottom",
@@ -251,7 +286,7 @@ impl Placement {
                 props.insert(key.into(), json!(mm_to_hu(v).round() as i32));
             }
         }
-        for ((name, v), key) in self.margins().into_iter().zip(margin_keys) {
+        for ((name, v), key) in self.margins().into_iter().zip(target.margin_keys()) {
             if let Some(v) = v {
                 check_range(name, v, 0.0, MAX_MARGIN_MM)?;
                 props.insert(key.into(), json!(mm_to_hu16(v)));
@@ -305,11 +340,7 @@ impl TableFormat {
     /// rhwp `set_table_properties_native` 속성 JSON. 값을 모두 검증한 뒤에 만든다.
     pub fn to_rhwp_json(&self) -> Result<String, ErrorData> {
         let mut props = Map::new();
-        self.placement.put(
-            &mut props,
-            ["outerLeft", "outerRight", "outerTop", "outerBottom"],
-            false,
-        )?;
+        self.placement.put(&mut props, PlacementTarget::Table)?;
         for (name, key, v) in [
             (
                 "cell_padding_left_mm",
@@ -340,6 +371,143 @@ impl TableFormat {
         }
         if let Some(v) = self.repeat_header {
             props.insert("repeatHeader".into(), json!(v));
+        }
+        if props.is_empty() {
+            return Err(ErrorData::invalid_params(
+                "format 에 바꿀 항목이 하나도 없다",
+                None,
+            ));
+        }
+        Ok(Value::Object(props).to_string())
+    }
+}
+
+/// 그림 효과.
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageEffect {
+    /// 원래 그림
+    Original,
+    /// 회색조
+    GrayScale,
+    /// 흑백
+    BlackWhite,
+    /// 무늬
+    Pattern8x8,
+}
+
+/// 그림 서식: 배치 + 크기·설명·밝기·대비·투명도·효과·회전·대칭. 적용 시 지정한 항목만 바뀐다.
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Default, PartialEq, Debug)]
+pub struct PictureFormat {
+    #[serde(flatten)]
+    pub placement: Placement,
+    /// 그림 폭 (mm)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width_mm: Option<f64>,
+    /// 그림 높이 (mm)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height_mm: Option<f64>,
+    /// 그림 설명(대체 텍스트). 제어 문자 불가
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 밝기 (-100..100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<i8>,
+    /// 대비 (-100..100)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contrast: Option<i8>,
+    /// 투명도 (%, 0 = 불투명 .. 100 = 완전 투명)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transparency: Option<u8>,
+    /// 그림 효과
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<ImageEffect>,
+    /// 회전 각 (도, -360..360)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_deg: Option<i16>,
+    /// 좌우 대칭
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub horz_flip: Option<bool>,
+    /// 상하 대칭
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vert_flip: Option<bool>,
+}
+
+impl PictureFormat {
+    pub fn from_picture(pic: &Picture) -> Self {
+        Self {
+            placement: Placement::from_common(&pic.common, &pic.common.margin),
+            width_mm: Some(hu_to_mm(pic.common.width as f64)),
+            height_mm: Some(hu_to_mm(pic.common.height as f64)),
+            description: Some(pic.common.description.clone()),
+            brightness: Some(pic.image_attr.brightness),
+            contrast: Some(pic.image_attr.contrast),
+            transparency: Some(pic.image_attr.transparency),
+            effect: Some(match pic.image_attr.effect {
+                RImageEffect::RealPic => ImageEffect::Original,
+                RImageEffect::GrayScale => ImageEffect::GrayScale,
+                RImageEffect::BlackWhite => ImageEffect::BlackWhite,
+                RImageEffect::Pattern8x8 => ImageEffect::Pattern8x8,
+            }),
+            rotation_deg: Some(pic.shape_attr.rotation_angle),
+            horz_flip: Some(pic.shape_attr.horz_flip),
+            vert_flip: Some(pic.shape_attr.vert_flip),
+        }
+    }
+
+    /// rhwp `set_picture_properties_native` 속성 JSON. 값을 모두 검증한 뒤에 만든다.
+    pub fn to_rhwp_json(&self) -> Result<String, ErrorData> {
+        let mut props = Map::new();
+        self.placement.put(&mut props, PlacementTarget::Picture)?;
+        for (name, key, v) in [
+            ("width_mm", "width", self.width_mm),
+            ("height_mm", "height", self.height_mm),
+        ] {
+            if let Some(v) = v {
+                check_range(name, v, 0.1, MAX_PAPER_MM)?;
+                props.insert(key.into(), json!(mm_to_hu(v).round().max(1.0) as u32));
+            }
+        }
+        if let Some(d) = &self.description {
+            // rhwp 의 JSON 문자열 해석은 \uXXXX 이스케이프를 풀지 않는다.
+            if d.chars().any(char::is_control) {
+                return Err(ErrorData::invalid_params(
+                    "description 에 제어 문자(줄바꿈 포함)를 쓸 수 없다",
+                    None,
+                ));
+            }
+            props.insert("description".into(), json!(d));
+        }
+        for (name, key, v) in [
+            ("brightness", "brightness", self.brightness),
+            ("contrast", "contrast", self.contrast),
+        ] {
+            if let Some(v) = v {
+                check_range(name, f64::from(v), -100.0, 100.0)?;
+                props.insert(key.into(), json!(v));
+            }
+        }
+        if let Some(v) = self.transparency {
+            check_range("transparency", f64::from(v), 0.0, 100.0)?;
+            props.insert("transparency".into(), json!(v));
+        }
+        if let Some(e) = self.effect {
+            let name = match e {
+                ImageEffect::Original => "RealPic",
+                ImageEffect::GrayScale => "GrayScale",
+                ImageEffect::BlackWhite => "BlackWhite",
+                ImageEffect::Pattern8x8 => "Pattern8x8",
+            };
+            props.insert("effect".into(), json!(name));
+        }
+        if let Some(v) = self.rotation_deg {
+            check_range("rotation_deg", f64::from(v), -360.0, 360.0)?;
+            props.insert("rotationAngle".into(), json!(v));
+        }
+        for (key, v) in [("horzFlip", self.horz_flip), ("vertFlip", self.vert_flip)] {
+            if let Some(v) = v {
+                props.insert(key.into(), json!(v));
+            }
         }
         if props.is_empty() {
             return Err(ErrorData::invalid_params(

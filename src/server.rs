@@ -21,7 +21,7 @@ use serde_json::{json, Value};
 use crate::cell_format::CellFormat;
 use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
 use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
-use crate::placement::TableFormat;
+use crate::placement::{PictureFormat, TableFormat};
 use crate::store::DocumentStore;
 
 /// 문단 미리보기 길이 (chars).
@@ -287,6 +287,34 @@ fn table_at(
             None,
         )),
     }
+}
+
+/// 본문 문단 (section, para) 의 컨트롤 control 인 그림 (묶음 안 그림 개체 포함,
+/// rhwp `set_picture_properties_native` 가 찾는 범위와 같다).
+fn picture_at(
+    doc: &Document,
+    section: usize,
+    para: usize,
+    control: usize,
+) -> Result<&rhwp::model::image::Picture, ErrorData> {
+    match paragraph_at(doc, section, para, None)?
+        .controls
+        .get(control)
+    {
+        Some(Control::Picture(pic)) => Ok(pic),
+        Some(Control::Shape(shape)) => match shape.as_ref() {
+            rhwp::model::shape::ShapeObject::Picture(pic) => Ok(pic),
+            _ => Err(not_picture(section, para, control)),
+        },
+        _ => Err(not_picture(section, para, control)),
+    }
+}
+
+fn not_picture(section: usize, para: usize, control: usize) -> ErrorData {
+    ErrorData::invalid_params(
+        format!("문단 {section}/{para} 의 컨트롤 {control} 은 그림이 아니다"),
+        None,
+    )
 }
 
 /// 본문 문단, 또는 cell 이면 그 표 셀 문단의 양식 개체.
@@ -665,6 +693,20 @@ pub struct ApplyTableFormatParams {
     pub control: usize,
     /// 적용할 표 서식 (get_table_format 결과와 같은 모양, 지정한 항목만 바뀐다)
     pub format: TableFormat,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyPictureFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 그림이 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스 (get_structure objects 의 control 값)
+    pub control: usize,
+    /// 적용할 그림 서식 (get_picture_format 결과와 같은 모양, 지정한 항목만 바뀐다)
+    pub format: PictureFormat,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1911,6 +1953,38 @@ impl HangulMcp {
                 .map_err(hwp_err)?;
             let table = table_at(session.core.document(), p.section, p.para, p.control)?;
             Ok(json!(TableFormat::from_table(table)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "그림 서식을 반환한다: 배치(inline, text_wrap, horz/vert_rel_to·align·offset_mm, 바깥 margin_*_mm), width_mm/height_mm, description, brightness, contrast, transparency, effect, rotation_deg, horz_flip/vert_flip. 결과는 apply_picture_format의 format 입력과 같은 모양."
+    )]
+    pub fn get_picture_format(
+        &self,
+        Parameters(p): Parameters<ObjectAtParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let pic = picture_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(PictureFormat::from_picture(pic)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "그림 서식을 바꾼다: inline(글자처럼 취급), text_wrap(square/tight/through/top_and_bottom/behind_text/in_front_of_text; tight/through는 HWPX에만 저장되고 .hwp 저장에서는 square가 된다), horz_rel_to(paper/page/column/para)·horz_align(left/center/right)·horz_offset_mm, vert_rel_to(paper/page/para)·vert_align(top/center/bottom)·vert_offset_mm, margin_*_mm(바깥 여백), width_mm/height_mm, description, brightness/contrast(-100..100), transparency(0..100), effect(original/gray_scale/black_white/pattern8x8), rotation_deg, horz_flip/vert_flip. 지정한 항목만 바뀐다."
+    )]
+    pub fn apply_picture_format(
+        &self,
+        Parameters(p): Parameters<ApplyPictureFormatParams>,
+    ) -> Result<String, ErrorData> {
+        let props = p.format.to_rhwp_json()?;
+        self.store.with_session_edit(&p.doc_id, |session| {
+            picture_at(session.core.document(), p.section, p.para, p.control)?;
+            session
+                .core
+                .set_picture_properties_native(p.section, p.para, p.control, &props)
+                .map_err(hwp_err)?;
+            let pic = picture_at(session.core.document(), p.section, p.para, p.control)?;
+            Ok(json!(PictureFormat::from_picture(pic)).to_string())
         })
     }
 

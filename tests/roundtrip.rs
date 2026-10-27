@@ -10,12 +10,13 @@ use hangul_mcp::format::{
 };
 use hangul_mcp::page::{Binding, Orientation, PageSetup};
 use hangul_mcp::placement::{
-    HorzAlign, HorzRelTo, Placement, TableFormat, TextWrap as PlacementWrap, VertRelTo,
+    HorzAlign, HorzRelTo, ImageEffect, PictureFormat, Placement, TableFormat,
+    TextWrap as PlacementWrap, VertRelTo,
 };
 use hangul_mcp::server::{
-    ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams,
-    ApplyTableFormatParams, BreakKind, CreateTableParams, DeleteTextParams, DocIdParams,
-    FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
+    ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyPictureFormatParams,
+    ApplyStyleParams, ApplyTableFormatParams, BreakKind, CreateTableParams, DeleteTextParams,
+    DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
     GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
     HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
@@ -3787,6 +3788,220 @@ fn apply_table_format_rejects_invalid_input() {
     )
     .is_err());
     undo(&server, &doc_id).expect("undo create_table");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 서식이 되돌리기 기록을 남김"
+    );
+}
+
+/// 본문 첫 문단 맨 앞에 그림을 넣고 (para, control) 을 돌려준다.
+fn insert_sample_picture(server: &HangulMcp, doc_id: &str, name: &str) -> (usize, usize) {
+    let (png_path, _) = sample_png(name);
+    let out: serde_json::Value = serde_json::from_str(
+        &server
+            .insert_picture(Parameters(picture_params(doc_id, &png_path)))
+            .unwrap(),
+    )
+    .unwrap();
+    (0, out["controlIdx"].as_u64().unwrap() as usize)
+}
+
+fn get_picture_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+) -> PictureFormat {
+    serde_json::from_str(
+        &server
+            .get_picture_format(Parameters(ObjectAtParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para,
+                control,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn apply_picture_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    format: PictureFormat,
+) -> Result<String, rmcp::ErrorData> {
+    server.apply_picture_format(Parameters(ApplyPictureFormatParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+        format,
+    }))
+}
+
+/// 배치(그림 전용 tight 포함)·크기·설명·이미지 속성·대칭이 조회와 HWPX/HWP 저장 뒤에 같은 값으로 남는다
+/// (tight 는 HWP 형식에 없어 HWP 저장에서 square).
+#[test]
+fn picture_format_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let pic = insert_sample_picture(&server, &doc_id, "pic_format.png");
+    let before = get_picture_format(&server, &doc_id, pic);
+    let change = PictureFormat {
+        placement: Placement {
+            inline: Some(false),
+            text_wrap: Some(PlacementWrap::Tight),
+            horz_rel_to: Some(HorzRelTo::Column),
+            horz_align: Some(HorzAlign::Right),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(5.0),
+            margin_left_mm: Some(1.5),
+            ..Default::default()
+        },
+        width_mm: Some(30.0),
+        height_mm: Some(12.0),
+        description: Some("바뀐 \"설명\"".to_string()),
+        brightness: Some(-20),
+        contrast: Some(30),
+        transparency: Some(40),
+        effect: Some(ImageEffect::GrayScale),
+        horz_flip: Some(true),
+        ..Default::default()
+    };
+    let expected = PictureFormat {
+        placement: Placement {
+            inline: Some(false),
+            text_wrap: Some(PlacementWrap::Tight),
+            horz_rel_to: Some(HorzRelTo::Column),
+            horz_align: Some(HorzAlign::Right),
+            vert_rel_to: Some(VertRelTo::Para),
+            vert_offset_mm: Some(5.0),
+            margin_left_mm: Some(1.5),
+            ..before.placement.clone()
+        },
+        width_mm: Some(30.0),
+        height_mm: Some(12.0),
+        description: Some("바뀐 \"설명\"".to_string()),
+        brightness: Some(-20),
+        contrast: Some(30),
+        transparency: Some(40),
+        effect: Some(ImageEffect::GrayScale),
+        horz_flip: Some(true),
+        ..before.clone()
+    };
+    let out: PictureFormat =
+        serde_json::from_str(&apply_picture_format(&server, &doc_id, pic, change).unwrap())
+            .unwrap();
+    assert_eq!(out, expected);
+    assert_eq!(get_picture_format(&server, &doc_id, pic), expected);
+    for (ext, doc) in save_both(&server, &doc_id, "picture_format") {
+        // HWP 5.0 의 본문과의 배치는 2비트(square/top_and_bottom/behind_text/in_front_of_text)라
+        // tight/through 는 HWPX 에만 남고 HWP 에서는 square 가 된다.
+        let mut want = expected.clone();
+        if ext == "hwp" {
+            want.placement.text_wrap = Some(PlacementWrap::Square);
+        }
+        assert_eq!(
+            PictureFormat::from_picture(single_picture(ext, &doc)),
+            want,
+            "{ext}"
+        );
+    }
+}
+
+/// 회전은 크기와 따로: 회전 각이 저장 뒤에도 남는다.
+#[test]
+fn picture_rotation_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let pic = insert_sample_picture(&server, &doc_id, "pic_rotate.png");
+    apply_picture_format(
+        &server,
+        &doc_id,
+        pic,
+        PictureFormat {
+            rotation_deg: Some(90),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_picture_format(&server, &doc_id, pic).rotation_deg,
+        Some(90)
+    );
+    for (ext, doc) in save_both(&server, &doc_id, "picture_rotate") {
+        assert_eq!(
+            PictureFormat::from_picture(single_picture(ext, &doc)).rotation_deg,
+            Some(90),
+            "{ext}"
+        );
+    }
+}
+
+#[test]
+fn apply_picture_format_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let pic = insert_sample_picture(&server, &doc_id, "pic_reject.png");
+    let placement = |p: Placement| PictureFormat {
+        placement: p,
+        ..Default::default()
+    };
+    let bad = [
+        PictureFormat::default(),
+        placement(Placement {
+            horz_align: Some(HorzAlign::Inside),
+            ..Default::default()
+        }),
+        placement(Placement {
+            vert_align: Some(hangul_mcp::placement::VertAlign::Outside),
+            ..Default::default()
+        }),
+        PictureFormat {
+            width_mm: Some(0.0),
+            ..Default::default()
+        },
+        PictureFormat {
+            brightness: Some(101),
+            ..Default::default()
+        },
+        PictureFormat {
+            contrast: Some(-101),
+            ..Default::default()
+        },
+        PictureFormat {
+            transparency: Some(101),
+            ..Default::default()
+        },
+        PictureFormat {
+            rotation_deg: Some(361),
+            ..Default::default()
+        },
+        PictureFormat {
+            description: Some("두\n줄".to_string()),
+            ..Default::default()
+        },
+    ];
+    for f in bad {
+        let desc = format!("{f:?}");
+        assert!(
+            apply_picture_format(&server, &doc_id, pic, f).is_err(),
+            "{desc}"
+        );
+    }
+    let table = create_table(&server, &doc_id, 1, 1);
+    assert!(apply_picture_format(
+        &server,
+        &doc_id,
+        table,
+        PictureFormat {
+            horz_flip: Some(true),
+            ..Default::default()
+        }
+    )
+    .is_err());
+    undo(&server, &doc_id).expect("undo create_table");
+    undo(&server, &doc_id).expect("undo insert_picture");
     assert!(
         undo(&server, &doc_id).is_err(),
         "실패한 서식이 되돌리기 기록을 남김"
