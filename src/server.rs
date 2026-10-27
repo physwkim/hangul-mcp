@@ -270,6 +270,52 @@ fn io_err(context: &str, e: std::io::Error) -> ErrorData {
     ErrorData::internal_error(format!("{context}: {e}"), None)
 }
 
+/// 한 쪽 Markdown 의 그림 토큰(`[[RHWP_IMAGE:n]]`, 쪽마다 1부터)을 `<md 파일이름>_assets/`
+/// 에 쓴 그림 파일 링크로 바꾼다. 쓴 파일 경로는 `written` 에 문서 순서대로 쌓이고, 파일
+/// 이름 번호도 문서 전체에서 이어진다. 그림 바이트를 찾지 못하면 토큰을 지우지 않고 오류로 낸다.
+fn link_markdown_images(
+    doc: &Document,
+    md_path: &std::path::Path,
+    mut md: String,
+    bin_ids: &[u16],
+    written: &mut Vec<String>,
+) -> Result<String, ErrorData> {
+    if bin_ids.is_empty() {
+        return Ok(md);
+    }
+    let stem = md_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document");
+    let dir_name = format!("{stem}_assets");
+    let dir = md_path.with_file_name(&dir_name);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| io_err(&format!("폴더 만들기 실패 {}", dir.display()), e))?;
+    for (i, &bin_id) in bin_ids.iter().enumerate() {
+        let content = doc
+            .bin_data_content
+            .iter()
+            .find(|c| c.id == bin_id)
+            .ok_or_else(|| {
+                ErrorData::internal_error(format!("그림 BinData {bin_id} 를 찾을 수 없다"), None)
+            })?;
+        let file = format!(
+            "img{:03}.{}",
+            written.len() + 1,
+            content.extension.to_ascii_lowercase()
+        );
+        let path = dir.join(&file);
+        std::fs::write(&path, content.data.load())
+            .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", path.display()), e))?;
+        written.push(path.display().to_string());
+        md = md.replace(
+            &format!("[[RHWP_IMAGE:{}]]", i + 1),
+            &format!("![image]({dir_name}/{file})"),
+        );
+    }
+    Ok(md)
+}
+
 /// 본문 문단 (section, para) 의 컨트롤 control 인 표.
 fn table_at(
     doc: &Document,
@@ -385,6 +431,18 @@ pub struct RenderPageParams {
     pub page: u32,
     /// 출력 파일 경로. 확장자 .svg 또는 .pdf로 형식을 고른다
     pub output_path: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ExportDocumentParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 출력 파일 경로. 확장자 .pdf / .md / .txt 로 형식을 고른다
+    pub output_path: String,
+    /// 첫 쪽 (0-기반, 포함). 생략하면 0
+    pub page_start: Option<u32>,
+    /// 끝 쪽 (0-기반, 포함). 생략하면 마지막 쪽
+    pub page_end: Option<u32>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1211,6 +1269,79 @@ impl HangulMcp {
                 "page_count": page_count,
                 "path": target.display().to_string(),
                 "bytes": bytes.len(),
+            })
+            .to_string())
+        })
+    }
+
+    #[tool(
+        description = "문서(또는 page_start..=page_end 쪽)를 조판 결과대로 한 파일로 내보낸다. 확장자로 형식을 고른다: .pdf(여러 쪽 PDF), .md(Markdown: 표는 Markdown 표, 그림은 <파일이름>_assets/ 폴더에 써서 링크), .txt(쪽에 보이는 줄 순서의 평문). page는 0-기반."
+    )]
+    pub fn export_document(
+        &self,
+        Parameters(p): Parameters<ExportDocumentParams>,
+    ) -> Result<String, ErrorData> {
+        let target = PathBuf::from(&p.output_path);
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        if !matches!(ext.as_deref(), Some("pdf" | "md" | "txt")) {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "출력 경로 확장자는 .pdf / .md / .txt 여야 한다: {}",
+                    target.display()
+                ),
+                None,
+            ));
+        }
+        self.store.with_session(&p.doc_id, |session| {
+            let core = &session.core;
+            let page_count = core.page_count();
+            let start = p.page_start.unwrap_or(0);
+            let end = p.page_end.unwrap_or(page_count - 1);
+            if start > end || end >= page_count {
+                return Err(ErrorData::invalid_params(
+                    format!("쪽 범위 {start}..={end} 잘못됨 (전체 {page_count}쪽, 0-기반)"),
+                    None,
+                ));
+            }
+            let pages: Vec<u32> = (start..=end).collect();
+            let mut images = Vec::new();
+            let bytes = match ext.as_deref() {
+                Some("pdf") => core.render_pages_pdf_native(&pages).map_err(hwp_err)?,
+                Some("txt") => pages
+                    .iter()
+                    .map(|&n| core.extract_page_text_native(n))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(hwp_err)?
+                    .join("\n")
+                    .into_bytes(),
+                _ => {
+                    let mut out = Vec::new();
+                    for &n in &pages {
+                        let (md, refs) = core
+                            .extract_page_markdown_with_images_native(n)
+                            .map_err(hwp_err)?;
+                        out.push(link_markdown_images(
+                            core.document(),
+                            &target,
+                            md,
+                            &refs.iter().map(|r| r.3).collect::<Vec<_>>(),
+                            &mut images,
+                        )?);
+                    }
+                    out.join("\n\n").into_bytes()
+                }
+            };
+            std::fs::write(&target, &bytes)
+                .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
+            Ok(json!({
+                "pages": [start, end],
+                "page_count": page_count,
+                "path": target.display().to_string(),
+                "bytes": bytes.len(),
+                "images": images,
             })
             .to_string())
         })

@@ -16,9 +16,9 @@ use hangul_mcp::placement::{
 use hangul_mcp::server::{
     ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyPictureFormatParams,
     ApplyStyleParams, ApplyTableFormatParams, BreakKind, CreateTableParams, DeleteTextParams,
-    DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams, GetCellFormatParams,
-    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
-    HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
+    DocIdParams, ExportDocumentParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
+    GetCellFormatParams, GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp,
+    HeaderFooterKind, HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
     InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
     MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
     ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
@@ -4006,4 +4006,137 @@ fn apply_picture_format_rejects_invalid_input() {
         undo(&server, &doc_id).is_err(),
         "실패한 서식이 되돌리기 기록을 남김"
     );
+}
+
+fn export(
+    server: &HangulMcp,
+    doc_id: &str,
+    path: &str,
+    pages: (Option<u32>, Option<u32>),
+) -> Result<Value, rmcp::ErrorData> {
+    server
+        .export_document(Parameters(ExportDocumentParams {
+            doc_id: doc_id.to_string(),
+            output_path: path.to_string(),
+            page_start: pages.0,
+            page_end: pages.1,
+        }))
+        .map(|out| serde_json::from_str(&out).unwrap())
+}
+
+/// 첫 쪽에 MARKONE, 쪽 나누기 뒤 둘째 쪽에 MARKTWO 가 있는 두 쪽 문서.
+fn two_page_doc(server: &HangulMcp) -> String {
+    let (doc_id, _) = open(server, &fixture("ref_text.hwpx"));
+    insert_at0(server, &doc_id, "MARKONE");
+    insert_break(server, &doc_id, 7, None).expect("insert_break");
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para: 1,
+            char_offset: 0,
+            text: "MARKTWO".to_string(),
+            cell: None,
+        }))
+        .expect("insert_text");
+    doc_id
+}
+
+/// PDF 쪽 객체 수 (/Type /Pages 는 빼고).
+fn pdf_page_count(pdf: &[u8]) -> usize {
+    let s = String::from_utf8_lossy(pdf);
+    s.match_indices("/Type /Page")
+        .filter(|(i, _)| !s[i + 11..].starts_with('s'))
+        .count()
+}
+
+#[test]
+fn export_document_pdf_txt_page_ranges() {
+    let server = HangulMcp::new();
+    let doc_id = two_page_doc(&server);
+
+    let pdf = temp_out("export_all.pdf");
+    let out = export(&server, &doc_id, &pdf, (None, None)).unwrap();
+    assert_eq!(
+        (out["pages"].clone(), out["page_count"].clone()),
+        (serde_json::json!([0, 1]), serde_json::json!(2))
+    );
+    let bytes = std::fs::read(&pdf).unwrap();
+    assert!(bytes.starts_with(b"%PDF"));
+    assert_eq!(pdf_page_count(&bytes), 2);
+    let pdf1 = temp_out("export_p1.pdf");
+    export(&server, &doc_id, &pdf1, (Some(1), None)).unwrap();
+    assert_eq!(pdf_page_count(&std::fs::read(&pdf1).unwrap()), 1);
+
+    let txt = temp_out("export_all.txt");
+    export(&server, &doc_id, &txt, (None, None)).unwrap();
+    let all = std::fs::read_to_string(&txt).unwrap();
+    let (one, two) = (all.find("MARKONE").unwrap(), all.find("MARKTWO").unwrap());
+    assert!(one < two, "{all}");
+    let txt0 = temp_out("export_p0.txt");
+    export(&server, &doc_id, &txt0, (Some(0), Some(0))).unwrap();
+    let page0 = std::fs::read_to_string(&txt0).unwrap();
+    assert!(
+        page0.contains("MARKONE") && !page0.contains("MARKTWO"),
+        "{page0}"
+    );
+}
+
+/// Markdown: 표는 Markdown 표로, 그림은 <이름>_assets/ 에 원본 바이트로 쓰고 링크한다.
+#[test]
+fn export_document_markdown_tables_and_images() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (png_path, png) = sample_png("export_md.png");
+    server
+        .insert_picture(Parameters(picture_params(&doc_id, &png_path)))
+        .unwrap();
+    let (para, control) = create_table(&server, &doc_id, 1, 2);
+    server
+        .set_cell_text(Parameters(SetCellTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            control,
+            cell: 1,
+            cell_para: None,
+            text: "CELLMARK".to_string(),
+        }))
+        .unwrap();
+    let md_path = temp_out("export_doc.md");
+    let out = export(&server, &doc_id, &md_path, (None, None)).unwrap();
+    let md = std::fs::read_to_string(&md_path).unwrap();
+    assert!(
+        md.lines()
+            .any(|l| l.starts_with('|') && l.contains("CELLMARK")),
+        "{md}"
+    );
+    assert!(
+        md.contains("![image](export_doc_assets/img001.png)"),
+        "{md}"
+    );
+    assert!(!md.contains("RHWP_IMAGE"), "{md}");
+    let images = out["images"].as_array().unwrap();
+    assert_eq!(images.len(), 1, "{out}");
+    assert_eq!(std::fs::read(images[0].as_str().unwrap()).unwrap(), png);
+}
+
+#[test]
+fn export_document_rejects_bad_range_and_extension() {
+    let server = HangulMcp::new();
+    let doc_id = two_page_doc(&server);
+    for (name, pages) in [
+        ("export_bad.svg", (None, None)),
+        ("export_bad.docx", (None, None)),
+        ("export_bad1.pdf", (Some(1), Some(0))),
+        ("export_bad2.pdf", (None, Some(2))),
+        ("export_bad3.txt", (Some(2), None)),
+    ] {
+        let path = temp_out(name);
+        assert!(
+            export(&server, &doc_id, &path, pages).is_err(),
+            "{name} {pages:?}"
+        );
+        assert!(!std::path::Path::new(&path).exists(), "{name} 이 쓰였다");
+    }
 }
