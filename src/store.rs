@@ -9,9 +9,10 @@
 //! (여러 단계 편집이 중간에 실패해도 반쯤 바뀐 문서가 남지 않는다).
 
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use rhwp::document_core::DocumentCore;
 use rmcp::ErrorData;
@@ -132,18 +133,13 @@ impl DocumentStore {
             path,
             history: History::default(),
         };
-        self.sessions
-            .lock()
-            .expect("document store poisoned")
-            .insert(id.clone(), session);
+        self.lock().insert(id.clone(), session);
         id
     }
 
     /// 세션을 제거하고 (path, dirty)를 반환한다.
     pub fn remove(&self, doc_id: &str) -> Result<(PathBuf, bool), ErrorData> {
-        self.sessions
-            .lock()
-            .expect("document store poisoned")
+        self.lock()
             .remove(doc_id)
             .map(|s| {
                 let dirty = s.is_dirty();
@@ -154,9 +150,7 @@ impl DocumentStore {
 
     /// 열린 문서 목록: (doc_id, path, dirty).
     pub fn list(&self) -> Vec<(String, PathBuf, bool)> {
-        self.sessions
-            .lock()
-            .expect("document store poisoned")
+        self.lock()
             .iter()
             .map(|(id, s)| (id.clone(), s.path.clone(), s.is_dirty()))
             .collect()
@@ -168,9 +162,9 @@ impl DocumentStore {
         doc_id: &str,
         f: impl FnOnce(&DocumentSession) -> Result<T, ErrorData>,
     ) -> Result<T, ErrorData> {
-        let guard = self.sessions.lock().expect("document store poisoned");
+        let guard = self.lock();
         let session = guard.get(doc_id).ok_or_else(|| unknown_doc(doc_id))?;
-        f(session)
+        no_panic(|| f(session))
     }
 
     /// 편집 접근 — 문서를 바꾸는 유일한 관문. 호출 전 스냅샷을 떠서, 클로저가 Ok 면
@@ -180,10 +174,10 @@ impl DocumentStore {
         doc_id: &str,
         f: impl FnOnce(&mut DocumentSession) -> Result<T, ErrorData>,
     ) -> Result<T, ErrorData> {
-        let mut guard = self.sessions.lock().expect("document store poisoned");
+        let mut guard = self.lock();
         let session = guard.get_mut(doc_id).ok_or_else(|| unknown_doc(doc_id))?;
         let before = session.core.save_snapshot_native();
-        match f(session) {
+        match no_panic(|| f(&mut *session)) {
             Ok(result) => {
                 session.record_edit(before);
                 Ok(result)
@@ -208,9 +202,9 @@ impl DocumentStore {
         doc_id: &str,
         f: impl FnOnce(&DocumentSession) -> Result<T, ErrorData>,
     ) -> Result<T, ErrorData> {
-        let mut guard = self.sessions.lock().expect("document store poisoned");
+        let mut guard = self.lock();
         let session = guard.get_mut(doc_id).ok_or_else(|| unknown_doc(doc_id))?;
-        let result = f(session)?;
+        let result = no_panic(|| f(session))?;
         session.history.saved_state = session.history.state;
         Ok(result)
     }
@@ -225,10 +219,17 @@ impl DocumentStore {
         self.step(doc_id, false)
     }
 
+    /// 저장소 잠금. 클로저 panic 은 `no_panic` 이 잠금 안에서 잡으므로 poison 은 잠금을 쥔 채
+    /// 저장소 코드 자체가 panic 한 경우뿐이다. 맵은 insert/remove 단위로만 바뀌어 그때도
+    /// 일관되므로, poison 으로 이후 모든 호출을 죽이지 않고 그대로 이어 쓴다.
+    fn lock(&self) -> MutexGuard<'_, HashMap<String, DocumentSession>> {
+        self.sessions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn step(&self, doc_id: &str, undo: bool) -> Result<HistoryStatus, ErrorData> {
-        let mut guard = self.sessions.lock().expect("document store poisoned");
+        let mut guard = self.lock();
         let session = guard.get_mut(doc_id).ok_or_else(|| unknown_doc(doc_id))?;
-        session.step(undo)?;
+        no_panic(|| session.step(undo))?;
         Ok(session.history_status())
     }
 }
@@ -238,6 +239,23 @@ pub struct HistoryStatus {
     pub undo_available: usize,
     pub redo_available: usize,
     pub dirty: bool,
+}
+
+/// 클로저 panic(rhwp 내부 인덱스 오류 등)을 도구 오류로 바꾼다. 그대로 두면 응답 없이
+/// 요청 task 가 죽고 저장소 잠금이 poison 된다. 편집 중 panic 은 `with_session_edit` 가
+/// 다른 Err 와 똑같이 스냅샷으로 되돌린다.
+fn no_panic<T>(f: impl FnOnce() -> Result<T, ErrorData>) -> Result<T, ErrorData> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|payload| {
+        let msg = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "알 수 없는 panic".into());
+        Err(ErrorData::internal_error(
+            format!("rhwp 내부 오류(panic): {msg}"),
+            None,
+        ))
+    })
 }
 
 fn unknown_doc(doc_id: &str) -> ErrorData {
@@ -280,5 +298,39 @@ mod tests {
         assert_eq!(para0(&store, &id), before, "실패한 편집의 앞 단계가 남음");
         let status = store.with_session(&id, |s| Ok(s.history_status())).unwrap();
         assert_eq!((status.undo_available, status.dirty), (0, false));
+    }
+
+    /// 편집 클로저가 panic 해도 오류로 돌아오고, 앞 단계는 되돌려지며, 저장소는 계속 쓸 수 있다.
+    #[test]
+    fn panicking_edit_rolls_back_and_store_stays_usable() {
+        let (store, id) = store_with_doc();
+        let before = para0(&store, &id);
+        let err = store
+            .with_session_edit(&id, |s| -> Result<(), ErrorData> {
+                s.core.insert_text_native(0, 0, 0, "반쯤").unwrap();
+                panic!("둘째 단계 panic");
+            })
+            .unwrap_err();
+        assert!(err.message.contains("둘째 단계 panic"), "{}", err.message);
+        assert_eq!(para0(&store, &id), before, "panic 한 편집의 앞 단계가 남음");
+        let status = store.with_session(&id, |s| Ok(s.history_status())).unwrap();
+        assert_eq!((status.undo_available, status.dirty), (0, false));
+        assert!(store
+            .with_session(&id, |_| -> Result<(), ErrorData> { panic!("읽기 panic") })
+            .is_err());
+        assert_eq!(store.list().len(), 1);
+    }
+
+    /// 잠금을 쥔 채 panic 해 poison 된 저장소도 이후 호출을 그대로 받는다.
+    #[test]
+    fn poisoned_lock_is_recovered() {
+        let (store, id) = store_with_doc();
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = store.sessions.lock().unwrap();
+            panic!("잠금 쥔 채 panic");
+        }));
+        assert!(store.sessions.is_poisoned());
+        assert_eq!(para0(&store, &id), para0(&store, &id));
+        assert_eq!(store.list().len(), 1);
     }
 }
