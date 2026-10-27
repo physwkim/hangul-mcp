@@ -62,7 +62,7 @@ place in every tool.
 | Tool | Description |
 |------|-------------|
 | `open_document(path)` | Open a document → `{doc_id, sections, paragraphs_per_section, page_count}` |
-| `save_document(doc_id, output_path?)` | Save as HWPX or HWP 5.0, chosen by the path extension (`.hwpx` / `.hwp`). Overwrites the original when `output_path` is omitted. A `.hwp` save reports in `warnings` how many objects with `tight`/`through` wrapping it stored as `square` (HWP 5.0 has no field value for either) |
+| `save_document(doc_id, output_path?)` | Save as HWPX or HWP 5.0, chosen by the path extension (`.hwpx` / `.hwp`). Overwrites the original when `output_path` is omitted. `warnings` lists what the output format could not hold: rhwp's content-loss report (emptied binary data, omitted controls, reduced metadata) and, for `.hwp`, how many objects with `tight`/`through` wrapping were stored as `square` (HWP 5.0 has no field value for either) |
 | `render_page(doc_id, page, output_path)` | Lay out one page (0-based) of the current, possibly unsaved, state and write it as SVG or PDF (by `.svg` / `.pdf` extension) |
 | `export_document(doc_id, output_path, page_start?, page_end?)` | Export the whole document (or a 0-based inclusive page range) as laid out: `.pdf` (multi-page), `.md` (tables as Markdown tables, pictures written to `<name>_assets/` and linked; a picture inside a table cell is linked right after that table), or `.txt` (lines in page order) |
 | `undo(doc_id)` | Revert the last successful editing tool call as one unit (up to 20 steps). Returning to the saved state clears `dirty` |

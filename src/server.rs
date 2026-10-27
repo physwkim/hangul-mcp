@@ -1662,7 +1662,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문서를 저장한다. 경로 확장자가 .hwpx면 HWPX, .hwp면 HWP 5.0 바이너리로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다. .hwp 로 표현할 수 없어 바뀐 것(tight/through 배치 → square)은 결과 warnings 로 알린다."
+        description = "문서를 저장한다. 경로 확장자가 .hwpx면 HWPX, .hwp면 HWP 5.0 바이너리로 저장한다. output_path 생략 시 원본 경로를 덮어쓴다. 저장 형식이 담지 못해 잃거나 바뀐 내용(rhwp 내용 손실 보고, .hwp 의 tight/through 배치 → square)은 결과 warnings 로 알린다."
     )]
     pub fn save_document(
         &self,
@@ -1677,10 +1677,11 @@ impl HangulMcp {
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(str::to_ascii_lowercase);
-            let bytes = match ext.as_deref() {
-                Some("hwpx") => session.core.export_hwpx_native(),
+            // 보고판 export 는 같은 바이트에 손실 보고를 더한다 — 보고 없는 판은 손실을 stderr 로만 흘린다.
+            let serialized = match ext.as_deref() {
+                Some("hwpx") => session.core.export_hwpx_native_with_report(),
                 // HWPX 출처 IR 은 HWP 호환 형태로 바꿔야 직렬화가 맞는다 (rhwp #178).
-                Some("hwp") => session.core.export_hwp_with_adapter(),
+                Some("hwp") => session.core.export_hwp_with_adapter_snapshot_with_report(),
                 _ => {
                     return Err(ErrorData::invalid_params(
                         format!(
@@ -1692,23 +1693,34 @@ impl HangulMcp {
                 }
             }
             .map_err(hwp_err)?;
+            let (bytes, report) = serialized.into_parts();
             std::fs::write(&target, &bytes)
                 .map_err(|e| io_err(&format!("파일 쓰기 실패 {}", target.display()), e))?;
             let mut out = json!({
                 "saved_path": target.display().to_string(),
                 "bytes": bytes.len(),
             });
+            let mut warnings: Vec<String> = report
+                .losses()
+                .iter()
+                .map(|l| {
+                    format!(
+                        "{:?} {:?} ({:?}): {}",
+                        l.code, l.subject, l.reason, l.path
+                    )
+                })
+                .collect();
             if ext.as_deref() == Some("hwp") {
-                let warning = match hwp_lossy_wraps(session.core.document()) {
-                    Ok(0) => None,
-                    Ok(n) => Some(format!(
+                match hwp_lossy_wraps(session.core.document()) {
+                    Ok(0) => {}
+                    Ok(n) => warnings.push(format!(
                         "tight/through 배치 개체 {n}개가 .hwp 에는 square 로 저장됐다 (HWPX 로 저장하면 유지된다)"
                     )),
-                    Err(e) => Some(format!("tight/through 배치 검사 실패: {e}")),
-                };
-                if let Some(w) = warning {
-                    out["warnings"] = json!([w]);
+                    Err(e) => warnings.push(format!("tight/through 배치 검사 실패: {e}")),
                 }
+            }
+            if !warnings.is_empty() {
+                out["warnings"] = json!(warnings);
             }
             Ok(out.to_string())
         })
