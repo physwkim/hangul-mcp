@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (51)
+## Tools (53)
 
 **Session**
 
@@ -135,6 +135,8 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 | `set_table_column_widths(doc_id, section, para, control, widths)` | Set per-column widths directly |
 | `merge_table_cells(doc_id, section, para, control, start_row, start_col, end_row, end_col)` | Merge a rectangular cell range (inclusive) |
 | `split_table_cell(doc_id, section, para, control, row, col, rows?, cols?)` | Unmerge a merged cell, or split a cell into `rows`×`cols` |
+| `get_cell_format(doc_id, section, para, control, row, col)` | Cell formatting → `background`, `border_left/right/top/bottom` (`{style, width_mm, color}`), `vertical_align`, `padding_*_mm` (the margins in effect), `header` — the same shape as the `format` input of `apply_cell_format` |
+| `apply_cell_format(doc_id, section, para, control, start_row, start_col, end_row?, end_col?, format)` | Apply cell formatting to every cell starting in the range: `background` (`"#RRGGBB"` / `"none"`), `border` (all four sides) or per-side borders, `vertical_align` (`top`/`center`/`bottom`), `padding_*_mm`, `header`. A partial border side keeps the side's other values; a side shared with a neighbouring cell is one line, as in Hangul, so the neighbour's side changes too |
 
 **Objects**
 

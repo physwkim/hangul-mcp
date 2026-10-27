@@ -18,6 +18,7 @@ use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::cell_format::CellFormat;
 use crate::format::{check_range, paragraph_at, CellTarget, CharFormat, ParaFormat};
 use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
 use crate::store::DocumentStore;
@@ -269,6 +270,25 @@ fn io_err(context: &str, e: std::io::Error) -> ErrorData {
 }
 
 /// 양식 개체 타입 → 표시 문자열 (rhwp `form_type_to_str`와 동일 표기).
+/// 본문 문단 (section, para) 의 컨트롤 control 인 표.
+fn table_at(
+    doc: &Document,
+    section: usize,
+    para: usize,
+    control: usize,
+) -> Result<&rhwp::model::table::Table, ErrorData> {
+    match paragraph_at(doc, section, para, None)?
+        .controls
+        .get(control)
+    {
+        Some(Control::Table(t)) => Ok(t),
+        _ => Err(ErrorData::invalid_params(
+            format!("문단 {section}/{para} 의 컨트롤 {control} 은 표가 아니다"),
+            None,
+        )),
+    }
+}
+
 /// 본문 문단, 또는 cell 이면 그 표 셀 문단의 양식 개체.
 fn form_at<'a>(
     doc: &'a Document,
@@ -630,6 +650,44 @@ pub struct MergeTableCellsParams {
     pub end_row: u16,
     /// 병합 끝 열 (포함)
     pub end_col: u16,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct GetCellFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표가 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스
+    pub control: usize,
+    /// 셀 행 (병합 셀이면 왼쪽 위 칸)
+    pub row: u16,
+    /// 셀 열 (병합 셀이면 왼쪽 위 칸)
+    pub col: u16,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyCellFormatParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스
+    pub section: usize,
+    /// 표가 속한 문단 인덱스
+    pub para: usize,
+    /// 문단 내 컨트롤 인덱스
+    pub control: usize,
+    /// 범위 시작 행 (포함)
+    pub start_row: u16,
+    /// 범위 시작 열 (포함)
+    pub start_col: u16,
+    /// 범위 끝 행 (포함, 생략 시 start_row)
+    pub end_row: Option<u16>,
+    /// 범위 끝 열 (포함, 생략 시 start_col)
+    pub end_col: Option<u16>,
+    /// 적용할 셀 서식 (get_cell_format 결과와 같은 모양, 지정한 항목만 바뀐다)
+    pub format: CellFormat,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1806,6 +1864,84 @@ impl HangulMcp {
                     p.section, p.para, offset, p.rows, p.cols, &options,
                 )
                 .map_err(hwp_err)
+        })
+    }
+
+    #[tool(
+        description = "표 셀의 서식을 반환한다: background, border_left/right/top/bottom(style·width_mm·color), vertical_align, padding_*_mm(실제 쓰이는 안 여백), header. 결과는 apply_cell_format의 format 입력과 같은 모양."
+    )]
+    pub fn get_cell_format(
+        &self,
+        Parameters(p): Parameters<GetCellFormatParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let doc = session.core.document();
+            let table = table_at(doc, p.section, p.para, p.control)?;
+            let cell = table
+                .cells
+                .iter()
+                .find(|c| c.row == p.row && c.col == p.col)
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(
+                        format!("({}, {}) 에서 시작하는 셀이 없다", p.row, p.col),
+                        None,
+                    )
+                })?;
+            Ok(json!(CellFormat::from_cell(doc, table, cell)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "표의 (start_row,start_col)~(end_row,end_col) 범위 셀(끝 포함, 생략 시 한 셀)에 셀 서식을 적용한다: background(\"#RRGGBB\"/\"none\"), border(네 면 공통) 또는 border_left/right/top/bottom {style, width_mm, color}, vertical_align(top/center/bottom), padding_*_mm, header. 지정한 항목만 바뀐다. 이웃 셀과 맞닿은 테두리 면은 한글처럼 한 줄이라 이웃 셀 쪽 면도 함께 바뀐다."
+    )]
+    pub fn apply_cell_format(
+        &self,
+        Parameters(p): Parameters<ApplyCellFormatParams>,
+    ) -> Result<String, ErrorData> {
+        p.format.validate()?;
+        let end_row = p.end_row.unwrap_or(p.start_row);
+        let end_col = p.end_col.unwrap_or(p.start_col);
+        if end_row < p.start_row || end_col < p.start_col {
+            return Err(ErrorData::invalid_params(
+                "end_row/end_col 은 start_row/start_col 이상이어야 한다",
+                None,
+            ));
+        }
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let doc = session.core.document();
+            let table = table_at(doc, p.section, p.para, p.control)?;
+            if end_row >= table.row_count || end_col >= table.col_count {
+                return Err(ErrorData::invalid_params(
+                    format!(
+                        "범위 끝 ({end_row}, {end_col}) 이 표 크기 {}×{} 를 넘는다",
+                        table.row_count, table.col_count
+                    ),
+                    None,
+                ));
+            }
+            let mut targets = Vec::new();
+            for (idx, cell) in table.cells.iter().enumerate() {
+                let inside = (p.start_row..=end_row).contains(&cell.row)
+                    && (p.start_col..=end_col).contains(&cell.col);
+                if inside {
+                    targets.push((idx, p.format.to_rhwp_props(doc, table, cell)?));
+                }
+            }
+            if targets.is_empty() {
+                return Err(ErrorData::invalid_params(
+                    "범위 안에서 시작하는 셀이 없다 (병합 셀은 왼쪽 위 칸으로 지정)",
+                    None,
+                ));
+            }
+            for (idx, (layout, paint)) in &targets {
+                for props in [layout, paint].into_iter().flatten() {
+                    session
+                        .core
+                        .set_cell_properties_native(p.section, p.para, p.control, *idx, props)
+                        .map_err(hwp_err)?;
+                }
+            }
+            Ok(json!({"cells": targets.len()}).to_string())
         })
     }
 

@@ -4,21 +4,22 @@
 
 use std::path::PathBuf;
 
+use hangul_mcp::cell_format::{BorderSide, BorderStyle, CellFormat, VerticalAlign};
 use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
 use hangul_mcp::page::{Binding, Orientation, PageSetup};
 use hangul_mcp::server::{
-    ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams, BreakKind, CreateTableParams,
-    DeleteTextParams, DocIdParams, FieldByNameParams, FitTableToPageParams, FormAtParams,
-    GetCharFormatParams, GetTableParams, GetTextParams, HangulMcp, HeaderFooterKind,
-    HeaderFooterPages, HeaderFooterParams, InsertBreakParams, InsertNoteParams,
-    InsertPictureParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
-    MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
-    ParaParams, ParaTargetParams, RenderPageParams, ReplaceTextParams, SaveDocumentParams,
-    SectionParams, SetCellTextParams, SetFieldValueParams, SetFormValueParams,
-    SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams, SplitTableCellParams,
-    StyleRef,
+    ApplyCellFormatParams, ApplyCharFormatParams, ApplyParaFormatParams, ApplyStyleParams,
+    BreakKind, CreateTableParams, DeleteTextParams, DocIdParams, FieldByNameParams,
+    FitTableToPageParams, FormAtParams, GetCellFormatParams, GetCharFormatParams, GetTableParams,
+    GetTextParams, HangulMcp, HeaderFooterKind, HeaderFooterPages, HeaderFooterParams,
+    InsertBreakParams, InsertNoteParams, InsertPictureParams, InsertTableColumnParams,
+    InsertTableRowParams, InsertTextParams, MergeParagraphParams, MergeTableCellsParams, NoteKind,
+    ObjectAtParams, OpenDocumentParams, ParaParams, ParaTargetParams, RenderPageParams,
+    ReplaceTextParams, SaveDocumentParams, SectionParams, SetCellTextParams, SetFieldValueParams,
+    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, SplitParagraphParams,
+    SplitTableCellParams, StyleRef,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -3387,5 +3388,218 @@ fn form_in_table_cell_rejects_wrong_target() {
     assert!(
         undo(&server, &doc_id).is_err(),
         "실패한 설정이 되돌리기 기록을 남김"
+    );
+}
+
+fn get_cell_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    row: u16,
+    col: u16,
+) -> CellFormat {
+    serde_json::from_str(
+        &server
+            .get_cell_format(Parameters(GetCellFormatParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+                para,
+                control,
+                row,
+                col,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn apply_cell_format(
+    server: &HangulMcp,
+    doc_id: &str,
+    (para, control): (usize, usize),
+    (start_row, start_col, end_row, end_col): (u16, u16, Option<u16>, Option<u16>),
+    format: CellFormat,
+) -> Result<String, rmcp::ErrorData> {
+    server.apply_cell_format(Parameters(ApplyCellFormatParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        para,
+        control,
+        start_row,
+        start_col,
+        end_row,
+        end_col,
+        format,
+    }))
+}
+
+fn side(style: BorderStyle, width_mm: f64, color: &str) -> BorderSide {
+    BorderSide {
+        style: Some(style),
+        width_mm: Some(width_mm),
+        color: Some(color.to_string()),
+    }
+}
+
+/// 범위 적용·면별 부분 덮어쓰기·안 여백이 조회와 HWPX/HWP 저장 뒤에 같은 값으로 남고,
+/// 범위 밖 셀은 맞닿은 테두리 면만 따라 바뀐다.
+#[test]
+fn cell_format_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 2, 3);
+    let untouched = get_cell_format(&server, &doc_id, table, 1, 0);
+
+    let red = side(BorderStyle::Solid, 0.4, "#ff0000");
+    let out: Value = serde_json::from_str(
+        &apply_cell_format(
+            &server,
+            &doc_id,
+            table,
+            (0, 0, None, Some(2)),
+            CellFormat {
+                background: Some("#ffcc00".to_string()),
+                border: Some(red.clone()),
+                vertical_align: Some(VerticalAlign::Center),
+                header: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("apply row 0"),
+    )
+    .unwrap();
+    assert_eq!(out["cells"], 3, "{out}");
+    // 한 면의 선 종류만 바꾸면 굵기·색은 그 면의 현재 값, 배경은 그대로여야 한다.
+    apply_cell_format(
+        &server,
+        &doc_id,
+        table,
+        (0, 1, None, None),
+        CellFormat {
+            border_bottom: Some(BorderSide {
+                style: Some(BorderStyle::Double),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .expect("apply bottom");
+    apply_cell_format(
+        &server,
+        &doc_id,
+        table,
+        (1, 1, None, None),
+        CellFormat {
+            padding_left_mm: Some(5.0),
+            ..Default::default()
+        },
+    )
+    .expect("apply padding");
+
+    let f01 = get_cell_format(&server, &doc_id, table, 0, 1);
+    assert_eq!(f01.background.as_deref(), Some("#ffcc00"));
+    assert_eq!(f01.border_top, Some(red.clone()));
+    assert_eq!(
+        f01.border_bottom,
+        Some(side(BorderStyle::Double, 0.4, "#ff0000"))
+    );
+    assert_eq!(f01.vertical_align, Some(VerticalAlign::Center));
+    assert_eq!(f01.header, Some(true));
+    let f11 = get_cell_format(&server, &doc_id, table, 1, 1);
+    assert_eq!(f11.padding_left_mm, Some(5.0));
+    assert_eq!(
+        (f11.padding_right_mm, f11.padding_top_mm),
+        (untouched.padding_right_mm, untouched.padding_top_mm),
+        "지정하지 않은 안 여백이 바뀜"
+    );
+    // 맞닿은 면은 한글처럼 한 줄이다: 0행 아래 테두리가 1행 위 테두리로도 보인다.
+    assert_eq!(
+        get_cell_format(&server, &doc_id, table, 1, 0),
+        CellFormat {
+            border_top: Some(red.clone()),
+            ..untouched.clone()
+        }
+    );
+    assert_eq!(
+        f11.border_top,
+        Some(side(BorderStyle::Double, 0.4, "#ff0000")),
+        "(0,1) 아래 면을 바꾸면 (1,1) 위 면도 같아야 한다"
+    );
+
+    let expected: Vec<CellFormat> = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+        .iter()
+        .map(|&(r, c)| get_cell_format(&server, &doc_id, table, r, c))
+        .collect();
+    for (ext, doc) in save_both(&server, &doc_id, "cell_format") {
+        let t = table_at(&doc, table.0, table.1);
+        let got: Vec<CellFormat> = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)]
+            .iter()
+            .map(|&(r, c)| {
+                let cell = t.cells.iter().find(|x| x.row == r && x.col == c).unwrap();
+                CellFormat::from_cell(&doc, t, cell)
+            })
+            .collect();
+        assert_eq!(got, expected, "{ext}");
+    }
+}
+
+#[test]
+fn apply_cell_format_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let table = create_table(&server, &doc_id, 2, 2);
+    let ok_format = || CellFormat {
+        background: Some("#00ff00".to_string()),
+        ..Default::default()
+    };
+    let bad_formats = [
+        CellFormat::default(),
+        CellFormat {
+            background: Some("blue".to_string()),
+            ..Default::default()
+        },
+        CellFormat {
+            border: Some(side(BorderStyle::Solid, 0.33, "#000000")),
+            ..Default::default()
+        },
+        CellFormat {
+            border_left: Some(side(BorderStyle::Solid, 0.4, "red")),
+            ..Default::default()
+        },
+        CellFormat {
+            padding_top_mm: Some(-1.0),
+            ..Default::default()
+        },
+    ];
+    for f in bad_formats {
+        let desc = format!("{f:?}");
+        assert!(
+            apply_cell_format(&server, &doc_id, table, (0, 0, None, None), f).is_err(),
+            "{desc}"
+        );
+    }
+    for range in [
+        (1, 0, Some(0), None),
+        (0, 0, Some(2), None),
+        (0, 0, None, Some(5)),
+    ] {
+        assert!(
+            apply_cell_format(&server, &doc_id, table, range, ok_format()).is_err(),
+            "{range:?}"
+        );
+    }
+    assert!(apply_cell_format(
+        &server,
+        &doc_id,
+        (table.0, table.1 + 9),
+        (0, 0, None, None),
+        ok_format()
+    )
+    .is_err());
+    // create_table 한 단계만 남아 있어야 한다.
+    undo(&server, &doc_id).expect("undo create_table");
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 서식이 되돌리기 기록을 남김"
     );
 }

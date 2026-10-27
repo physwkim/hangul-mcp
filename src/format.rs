@@ -80,7 +80,7 @@ fn invalid(msg: String) -> ErrorData {
 }
 
 /// "#RRGGBB" 만 받는다.
-fn check_color(key: &str, value: &str) -> Result<(), ErrorData> {
+pub(crate) fn check_color(key: &str, value: &str) -> Result<(), ErrorData> {
     let ok = value.len() == 7
         && value.starts_with('#')
         && value[1..].chars().all(|c| c.is_ascii_hexdigit());
@@ -109,7 +109,7 @@ pub(crate) fn check_range<T: PartialOrd + std::fmt::Display>(
 }
 
 /// HWP ColorRef(0x00BBGGRR) → "#rrggbb".
-fn color_css(c: u32) -> String {
+pub(crate) fn color_css(c: u32) -> String {
     format!(
         "#{:02x}{:02x}{:02x}",
         c & 0xFF,
