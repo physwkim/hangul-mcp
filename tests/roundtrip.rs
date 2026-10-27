@@ -8,7 +8,7 @@ use hangul_mcp::cell_format::{BorderSide, BorderStyle, CellFormat, VerticalAlign
 use hangul_mcp::format::{
     Alignment, CellTarget, CharFormat, LineSpacing, LineSpacingKind, ParaFormat,
 };
-use hangul_mcp::page::{Binding, Orientation, PageSetup};
+use hangul_mcp::page::{Binding, ColumnKind, Columns, Orientation, PageSetup};
 use hangul_mcp::placement::{
     HorzAlign, HorzRelTo, ImageEffect, PictureFormat, Placement, ShapeFormat, TableFormat,
     TextWrap as PlacementWrap, VertRelTo,
@@ -24,9 +24,9 @@ use hangul_mcp::server::{
     InsertShapeParams, InsertTableColumnParams, InsertTableRowParams, InsertTextParams,
     MergeParagraphParams, MergeTableCellsParams, NoteKind, ObjectAtParams, OpenDocumentParams,
     ParaParams, ParaTargetParams, RenameBookmarkParams, RenderPageParams, ReplaceTextParams,
-    SaveDocumentParams, SectionParams, SetCellTextParams, SetEquationParams, SetFieldValueParams,
-    SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, ShapeKind, SplitParagraphParams,
-    SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
+    SaveDocumentParams, SectionParams, SetCellTextParams, SetColumnsParams, SetEquationParams,
+    SetFieldValueParams, SetFormValueParams, SetHeaderFooterParams, SetPageSetupParams, ShapeKind,
+    SplitParagraphParams, SplitTableCellParams, StyleRef, UpdateHyperlinkParams,
 };
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::Value;
@@ -5403,5 +5403,157 @@ fn create_table_rejects_bad_cells() {
     assert!(
         undo(&server, &doc_id).is_err(),
         "실패한 create_table 이 되돌리기 기록을 남김"
+    );
+}
+
+fn get_columns(server: &HangulMcp, doc_id: &str) -> Columns {
+    serde_json::from_str(
+        &server
+            .get_columns(Parameters(SectionParams {
+                doc_id: doc_id.to_string(),
+                section: 0,
+            }))
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn set_columns(
+    server: &HangulMcp,
+    doc_id: &str,
+    columns: Columns,
+) -> Result<String, rmcp::ErrorData> {
+    server.set_columns(Parameters(SetColumnsParams {
+        doc_id: doc_id.to_string(),
+        section: 0,
+        columns,
+    }))
+}
+
+/// 재파싱 문서 구역 0 의 첫 단 정의.
+fn ir_columns(doc: &rhwp::model::document::Document) -> Columns {
+    let cd = doc.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            rhwp::model::control::Control::ColumnDef(cd) => Some(cd),
+            _ => None,
+        })
+        .expect("단 정의");
+    Columns::from_column_def(cd)
+}
+
+/// 2단 배분으로 바꾸면 조회와 HWPX/HWP 저장본에 남고, 간격만 바꾸면 단 수·종류는 그대로다.
+#[test]
+fn columns_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    assert_eq!(get_columns(&server, &doc_id).count, Some(1));
+    // 줄 폭은 HWP 저장본의 LINE_SEG 로 잰다 (HWPX 재파싱은 비어 있을 수 있다).
+    let seg_width = |doc: &rhwp::model::document::Document| {
+        doc.sections[0]
+            .paragraphs
+            .iter()
+            .find_map(|p| p.line_segs.first())
+            .expect("LINE_SEG")
+            .segment_width
+    };
+    let one_column = seg_width(&save_both(&server, &doc_id, "columns_before")[1].1);
+    let want = Columns {
+        count: Some(2),
+        kind: Some(ColumnKind::Distribute),
+        spacing_mm: Some(8.0),
+    };
+    let out: Columns =
+        serde_json::from_str(&set_columns(&server, &doc_id, want.clone()).unwrap()).unwrap();
+    assert_eq!(out, want);
+    assert_eq!(get_columns(&server, &doc_id), want);
+    for (ext, doc) in save_both(&server, &doc_id, "columns") {
+        assert_eq!(ir_columns(&doc), want, "{ext}");
+        if ext == "hwp" {
+            // 본문 줄 나눔이 단 폭으로 다시 계산된다: (본문 폭 − 간격 8mm) / 2.
+            let two_column = seg_width(&doc);
+            assert!(
+                (two_column - (one_column - 2268) / 2).abs() <= 2,
+                "{ext} 줄 폭 {two_column} (1단 {one_column})"
+            );
+        }
+    }
+    set_columns(
+        &server,
+        &doc_id,
+        Columns {
+            spacing_mm: Some(4.5),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let want = Columns {
+        spacing_mm: Some(4.5),
+        ..want
+    };
+    assert_eq!(get_columns(&server, &doc_id), want);
+    for (ext, doc) in save_both(&server, &doc_id, "columns_spacing") {
+        assert_eq!(ir_columns(&doc), want, "{ext}");
+    }
+    set_columns(
+        &server,
+        &doc_id,
+        Columns {
+            kind: Some(ColumnKind::Parallel),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        get_columns(&server, &doc_id),
+        Columns {
+            kind: Some(ColumnKind::Parallel),
+            ..want
+        }
+    );
+}
+
+#[test]
+fn set_columns_rejects_invalid_input() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    for bad in [
+        Columns::default(),
+        Columns {
+            count: Some(0),
+            ..Default::default()
+        },
+        Columns {
+            count: Some(256),
+            ..Default::default()
+        },
+        Columns {
+            spacing_mm: Some(-1.0),
+            ..Default::default()
+        },
+        Columns {
+            count: Some(255),
+            spacing_mm: Some(10.0),
+            ..Default::default()
+        },
+    ] {
+        let desc = format!("{bad:?}");
+        assert!(set_columns(&server, &doc_id, bad).is_err(), "{desc}");
+    }
+    assert!(server
+        .set_columns(Parameters(SetColumnsParams {
+            doc_id: doc_id.clone(),
+            section: 9,
+            columns: Columns {
+                count: Some(2),
+                ..Default::default()
+            },
+        }))
+        .is_err());
+    assert!(
+        undo(&server, &doc_id).is_err(),
+        "실패한 set_columns 가 되돌리기 기록을 남김"
     );
 }

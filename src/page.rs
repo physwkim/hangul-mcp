@@ -1,11 +1,12 @@
-//! 쪽 설정(용지 크기·방향·여백·제본) — MCP 입출력 타입과 rhwp `PageDef` 사이의 변환.
+//! 쪽 설정(용지 크기·방향·여백·제본)과 다단 — MCP 입출력 타입과 rhwp `PageDef`/`ColumnDef`
+//! 사이의 변환.
 //!
 //! 조회(`get_page_setup`)와 적용(`set_page_setup`)이 한 타입·한 단위(mm)를 쓴다.
 //! 용지 너비/높이는 한글 "용지 종류"의 크기(A4 = 210×297)이고, 가로 방향은 둘을 바꿔 그린다.
 //! rhwp 는 여백 합이 용지를 넘으면 오류 없이 5% 여백으로 폴백하므로 본문 영역이 남는지
 //! 여기서 먼저 확인한다.
 
-use rhwp::model::page::{BindingMethod, PageDef};
+use rhwp::model::page::{BindingMethod, ColumnDef, ColumnType, PageAreas, PageDef};
 use rmcp::ErrorData;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -233,4 +234,95 @@ fn check_body_area(pd: &PageDef) -> Result<(), ErrorData> {
         ));
     }
     Ok(())
+}
+
+/// 단 간격 상한 (mm). HWPUNIT16(i16, 약 115mm) 안.
+const MAX_COLUMN_SPACING_MM: f64 = 100.0;
+/// 단 수 상한 (한글 단 설정과 같다).
+const MAX_COLUMNS: u16 = 255;
+
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnKind {
+    /// 일반 다단: 앞 단을 채운 뒤 다음 단으로
+    Normal,
+    /// 배분 다단: 단마다 높이를 고르게
+    Distribute,
+    /// 평행 다단: 단을 따로 채운다
+    Parallel,
+}
+
+/// 구역 첫 단 설정. 적용 시 지정한 항목만 바뀐다.
+#[derive(Deserialize, Serialize, schemars::JsonSchema, Clone, Default, PartialEq, Debug)]
+pub struct Columns {
+    /// 단 수 (1 = 다단 아님, 최대 255)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<u16>,
+    /// 단 종류
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ColumnKind>,
+    /// 단 사이 간격 (mm)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spacing_mm: Option<f64>,
+}
+
+impl Columns {
+    pub fn from_column_def(cd: &ColumnDef) -> Self {
+        Self {
+            count: Some(cd.column_count),
+            kind: Some(match cd.column_type {
+                ColumnType::Normal => ColumnKind::Normal,
+                ColumnType::Distribute => ColumnKind::Distribute,
+                ColumnType::Parallel => ColumnKind::Parallel,
+            }),
+            spacing_mm: Some(hu_to_mm(cd.spacing.max(0) as u32)),
+        }
+    }
+
+    /// 현재 `cd` 에 지정 항목을 덮어쓴 rhwp `set_column_def_native` 인자
+    /// (단 수, 종류 코드, 너비 같게, 간격 HWPUNIT). 단마다 본문 폭이 남는지 먼저 확인한다.
+    /// rhwp 는 단 수가 바뀌면 단별 너비를 지우므로 그때는 너비를 같게 한다.
+    pub fn to_rhwp_args(
+        &self,
+        cd: &ColumnDef,
+        pd: &PageDef,
+    ) -> Result<(u16, u8, bool, i16), ErrorData> {
+        if *self == Self::default() {
+            return Err(ErrorData::invalid_params(
+                "columns 에 바꿀 항목이 하나도 없다",
+                None,
+            ));
+        }
+        let count = self.count.unwrap_or(cd.column_count);
+        check_range("count", f64::from(count), 1.0, f64::from(MAX_COLUMNS))?;
+        let spacing = match self.spacing_mm {
+            Some(v) => {
+                check_range("spacing_mm", v, 0.0, MAX_COLUMN_SPACING_MM)?;
+                mm_to_hu(v).round() as i16
+            }
+            None => cd.spacing,
+        };
+        let body = PageAreas::from_page_def(pd).body_area.width() as i64;
+        let gaps = i64::from(spacing.max(0)) * (i64::from(count) - 1);
+        if gaps >= body {
+            return Err(ErrorData::invalid_params(
+                format!(
+                    "단 간격 합 {}mm 가 본문 폭 {}mm 를 넘어 단 너비가 남지 않는다",
+                    hu_to_mm(gaps as u32),
+                    hu_to_mm(body as u32)
+                ),
+                None,
+            ));
+        }
+        let kind = match self
+            .kind
+            .unwrap_or(Self::from_column_def(cd).kind.expect("kind"))
+        {
+            ColumnKind::Normal => 0,
+            ColumnKind::Distribute => 1,
+            ColumnKind::Parallel => 2,
+        };
+        let same_width = cd.same_width || count != cd.column_count;
+        Ok((count, kind, same_width, spacing))
+    }
 }

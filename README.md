@@ -55,7 +55,7 @@ rhwp's split-type calls count inline objects (pictures treated as characters, fo
 extra positions; the server converts to that form, so the same `char_offset` means the same
 place in every tool.
 
-## Tools (72)
+## Tools (74)
 
 **Session**
 
@@ -121,6 +121,8 @@ with `para` the paragraph holding the table (the same form the formatting tools 
 |------|-------------|
 | `get_page_setup(doc_id, section)` | Paper size, orientation, margins and binding of a section in mm — the same shape as the `setup` input of `set_page_setup` |
 | `set_page_setup(doc_id, section, setup)` | Change `paper_width_mm`/`paper_height_mm` (portrait dimensions, A4 = 210×297), `orientation` (`portrait`/`landscape`), `margin_{left,right,top,bottom,header,footer,gutter}_mm`, `binding` (`single`/`duplex`/`top_flip`). Only the given fields change; margins that leave no body area are rejected |
+| `get_columns(doc_id, section)` | Section column layout → `count`, `kind`, `spacing_mm` — the same shape as the `columns` input of `set_columns` |
+| `set_columns(doc_id, section, columns)` | Change the section's first column layout: `count` (1–255; 1 turns multi-column off), `kind` (`normal`/`distribute`/`parallel`), `spacing_mm`. Only the given fields change; body text is rewrapped to the column width; a spacing that leaves no column width is rejected. Changing `count` makes the columns equal width |
 
 **Table editing**
 

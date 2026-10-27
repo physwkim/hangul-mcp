@@ -25,7 +25,7 @@ use crate::format::{
     check_color, check_range, color_bgr, color_css, paragraph_at, CellTarget, CharFormat,
     ParaFormat,
 };
-use crate::page::{mm_to_hu, PageSetup, MAX_PAPER_MM};
+use crate::page::{mm_to_hu, Columns, PageSetup, MAX_PAPER_MM};
 use crate::placement::{PictureFormat, ShapeFormat, TableFormat};
 use crate::store::DocumentStore;
 
@@ -584,6 +584,25 @@ fn not_picture(section: usize, para: usize, control: usize) -> ErrorData {
         format!("문단 {section}/{para} 의 컨트롤 {control} 은 그림이 아니다"),
         None,
     )
+}
+
+/// 구역의 첫 단 정의 (rhwp `set_column_def_native` 가 바꾸는 것과 같다). 없으면 rhwp 는 첫 문단에
+/// 텍스트 자리 없이 컨트롤을 덧붙이므로 거부한다.
+fn column_def_at(
+    doc: &Document,
+    section: usize,
+) -> Result<&rhwp::model::page::ColumnDef, ErrorData> {
+    doc.sections
+        .get(section)
+        .ok_or_else(|| ErrorData::invalid_params(format!("구역 {section} 이 없다"), None))?
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            Control::ColumnDef(cd) => Some(cd),
+            _ => None,
+        })
+        .ok_or_else(|| ErrorData::invalid_params(format!("구역 {section} 에 단 정의가 없다"), None))
 }
 
 /// 본문 문단 (section, para) 의 컨트롤 control 인 그리기 개체(직선/사각형/타원/호/다각형/곡선,
@@ -1422,6 +1441,16 @@ pub struct SectionParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct SetColumnsParams {
+    /// 문서 핸들
+    pub doc_id: String,
+    /// 구역 인덱스 (0-기반)
+    pub section: usize,
+    /// 바꿀 단 설정 (지정한 항목만 바뀐다. get_columns 결과와 같은 모양)
+    pub columns: Columns,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct SetPageSetupParams {
     /// 문서 핸들
     pub doc_id: String,
@@ -1665,6 +1694,41 @@ impl HangulMcp {
                 .section_def
                 .page_def;
             Ok(json!(PageSetup::from_page_def(pd)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "구역 첫 단 설정을 반환한다: count(단 수), kind(normal/distribute/parallel), spacing_mm(단 간격). 결과는 set_columns의 columns 입력과 같은 모양."
+    )]
+    pub fn get_columns(
+        &self,
+        Parameters(p): Parameters<SectionParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session(&p.doc_id, |session| {
+            let cd = column_def_at(session.core.document(), p.section)?;
+            Ok(json!(Columns::from_column_def(cd)).to_string())
+        })
+    }
+
+    #[tool(
+        description = "구역 첫 단 설정(다단)을 바꾼다: count(1..255, 1이면 다단 해제), kind(normal 일반/distribute 배분/parallel 평행), spacing_mm(단 간격). 지정한 항목만 바뀌고, 단 수를 바꾸면 단 너비는 같게 된다."
+    )]
+    pub fn set_columns(
+        &self,
+        Parameters(p): Parameters<SetColumnsParams>,
+    ) -> Result<String, ErrorData> {
+        self.store.with_session_edit(&p.doc_id, |session| {
+            let doc = session.core.document();
+            let cd = column_def_at(doc, p.section)?;
+            let (count, kind, same_width, spacing) = p
+                .columns
+                .to_rhwp_args(cd, &doc.sections[p.section].section_def.page_def)?;
+            session
+                .core
+                .set_column_def_native(p.section, count, kind, same_width, spacing)
+                .map_err(hwp_err)?;
+            let cd = column_def_at(session.core.document(), p.section)?;
+            Ok(json!(Columns::from_column_def(cd)).to_string())
         })
     }
 
