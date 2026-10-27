@@ -49,8 +49,11 @@ MCP protocol over stdio and takes no arguments.
 3. Call editing tools (changes stay in memory; a failing call leaves the document unchanged, and `undo` reverts a successful one)
 4. `save_document(doc_id, output_path?)` → write HWPX or HWP (chosen by the `.hwpx` / `.hwp` extension)
 
-All coordinates are 0-based and character positions are counted in `char` units.
-This is the same coordinate system rhwp's `DocumentCore` uses.
+All coordinates are 0-based. A character position (`char_offset`, `start`, `end`) is an index
+into the paragraph text as `get_text` returns it, and must not exceed the paragraph length.
+rhwp's split-type calls count inline objects (pictures treated as characters, footnotes) as
+extra positions; the server converts to that form, so the same `char_offset` means the same
+place in every tool.
 
 ## Tools (48)
 
