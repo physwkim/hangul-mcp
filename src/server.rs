@@ -3654,27 +3654,6 @@ impl HangulMcp {
                     ))
                 }
             };
-            // rhwp 는 새 글상자에 list_attr=0x20(세로 가운데)과 vertical_align=Top 을 함께 넣는다.
-            // HWP 저장기는 list_attr, HWPX 저장기·렌더러는 vertical_align 을 읽으므로
-            // list_attr 의 세로 정렬 비트(5~6)를 vertical_align 에 맞춘다.
-            if let Some(Control::Shape(shape)) = session
-                .core
-                .document_mut()
-                .sections
-                .get_mut(p.section)
-                .and_then(|s| s.paragraphs.get_mut(para))
-                .and_then(|pa| pa.controls.get_mut(ctrl))
-            {
-                if let Some(tb) = shape.drawing_mut().and_then(|d| d.text_box.as_mut()) {
-                    use rhwp::model::table::VerticalAlign;
-                    let bits = match tb.vertical_align {
-                        VerticalAlign::Top => 0,
-                        VerticalAlign::Center => 1,
-                        VerticalAlign::Bottom => 2,
-                    };
-                    tb.list_attr = (tb.list_attr & !(0b11 << 5)) | (bits << 5);
-                }
-            }
             // 글상자 문단은 rhwp 셀 편집 API 가 cell 0 으로 가리킨다.
             fill_cell_lines(&mut session.core, p.section, para, ctrl, 0, &lines)?;
             Ok(json!({"para": para, "control": ctrl}).to_string())
