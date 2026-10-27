@@ -722,8 +722,8 @@ fn section0_text(doc: &rhwp::model::document::Document) -> String {
 }
 
 /// `.hwp` 경로로 저장하면 HWP 5.0 바이너리가 나와야 하고, 그 뒤 같은 세션을
-/// `.hwpx` 로 다시 저장해도 편집 내용이 유지돼야 한다 — HWP 어댑터는 세션 IR 을
-/// 제자리에서 바꾸므로 이후 HWPX 저장 경로가 깨지지 않는지가 경계다.
+/// `.hwpx` 로 다시 저장해도 편집 내용이 유지돼야 한다 — HWP 어댑터는 세션 IR 의
+/// 복제본(`prepare_hwp_export_snapshot`)에서 돌므로 HWP 저장이 세션을 바꾸지 않는지가 경계다.
 #[test]
 fn save_as_hwp_then_hwpx_roundtrip() {
     let server = HangulMcp::new();
