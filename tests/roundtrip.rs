@@ -4818,6 +4818,73 @@ fn cell_equations(server: &HangulMcp, doc_id: &str) -> Vec<(usize, CellTarget, u
     out
 }
 
+/// 셀 문단 split 도 char_offset 을 글자 위치로 센다 — 앞에 인라인 수식이 둘 있어도 분할점이 당겨지지 않는다.
+#[test]
+fn split_cell_paragraph_offset_counts_text_chars_after_inline_equations() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("equation_in_cell.hwpx"));
+    let eqs = cell_equations(&server, &doc_id);
+    let (para, ref c, _, _) = eqs[0];
+    let target = || {
+        Some(CellTarget {
+            control: c.control,
+            cell: c.cell,
+            cell_para: c.cell_para,
+        })
+    };
+    let cell_para = |doc: &rhwp::model::document::Document, cp: usize| {
+        let rhwp::model::control::Control::Table(t) =
+            &doc.sections[0].paragraphs[para].controls[c.control]
+        else {
+            panic!("표 아님")
+        };
+        t.cells[c.cell].paragraphs[cp].clone()
+    };
+    let (_, doc) = save_both(&server, &doc_id, "split_cell_eq_before").remove(0);
+    let before = cell_para(&doc, c.cell_para());
+    let eq_count = before
+        .controls
+        .iter()
+        .filter(|x| matches!(x, rhwp::model::control::Control::Equation(_)))
+        .count();
+    assert!(eq_count >= 2, "픽스처 셀 문단 수식 {eq_count}");
+    let len = before.text.chars().count();
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: len,
+            text: "XY".to_string(),
+            cell: target(),
+        }))
+        .unwrap();
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: len + 1,
+            cell: target(),
+        }))
+        .unwrap();
+    for (ext, doc) in save_both(&server, &doc_id, "split_cell_eq") {
+        let first = cell_para(&doc, c.cell_para());
+        let second = cell_para(&doc, c.cell_para() + 1);
+        assert_eq!(first.text, format!("{}X", before.text), "{ext}");
+        assert_eq!(second.text, "Y", "{ext}");
+        assert_eq!(
+            first
+                .controls
+                .iter()
+                .filter(|x| matches!(x, rhwp::model::control::Control::Equation(_)))
+                .count(),
+            eq_count,
+            "{ext} 수식이 앞 문단에 남지 않음"
+        );
+    }
+}
+
 /// 셀 문단의 첫 수식은 바뀌어 저장되고, 첫 수식이 아니면 rhwp 가 다른 수식을 고치므로 거부한다.
 #[test]
 fn equation_in_table_cell() {
