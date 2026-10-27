@@ -5408,6 +5408,35 @@ fn hwp_save_warns_about_tight_and_through_wrap() {
     assert!(w[0].as_str().unwrap().contains("1개"), "{w}");
 }
 
+/// 새 글상자의 세로 정렬은 HWPX 와 HWP 저장본에서 같다 — rhwp 는 HWP LIST_HEADER 에
+/// list_attr 를, HWPX·렌더러에는 vertical_align 을 쓰므로 둘이 어긋나면 .hwp 만 가운데 정렬로 열린다.
+#[test]
+fn new_textbox_vertical_align_matches_across_formats() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (para, control) = insert_shape(
+        &server,
+        InsertShapeParams {
+            text: Some("가".to_string()),
+            ..shape_params(&doc_id, ShapeKind::Textbox, (60.0, 30.0))
+        },
+    )
+    .unwrap();
+    for (ext, doc) in save_both(&server, &doc_id, "textbox_valign") {
+        let rhwp::model::control::Control::Shape(shape) =
+            &doc.sections[0].paragraphs[para].controls[control]
+        else {
+            panic!("{ext} 도형 아님")
+        };
+        let tb = hangul_mcp::format::textbox(shape).expect("글상자");
+        assert_eq!(
+            tb.vertical_align,
+            rhwp::model::table::VerticalAlign::Top,
+            "{ext}"
+        );
+    }
+}
+
 /// 삽입 뒤에도 글상자 문단을 `cell {control, cell: 0}` 으로 편집하고, 목록·구조 도구가 그 위치를 알린다.
 #[test]
 fn textbox_edit_after_insert_roundtrip() {
