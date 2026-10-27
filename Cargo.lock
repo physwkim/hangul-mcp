@@ -1676,14 +1676,15 @@ dependencies = [
 
 [[package]]
 name = "read-fonts"
-version = "0.45.1"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4edc8db0d972de88e53a085b1f01fb3fbdae7bb0cb7a0ce2b2f8285a412fe3ef"
+checksum = "bdaa4fffe9ff3ca2c353fa9729792805b9b3e324695ff5a081f860612e81b330"
 dependencies = [
  "bytemuck",
  "foldhash",
  "font-types 0.12.7",
  "once_cell",
+ "smallvec",
  "yoke",
 ]
 
@@ -1782,7 +1783,7 @@ dependencies = [
 [[package]]
 name = "rhwp"
 version = "0.8.7"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "aes",
  "argon2",
@@ -1814,7 +1815,7 @@ dependencies = [
  "pdf-writer",
  "quick-xml 0.42.0",
  "rand_core",
- "read-fonts 0.45.1",
+ "read-fonts 0.46.0",
  "resvg 0.47.0",
  "rhwp-contracts",
  "rhwp-jpeg-encoder",
@@ -1847,7 +1848,7 @@ dependencies = [
 [[package]]
 name = "rhwp-contracts"
 version = "0.1.0"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "serde_json",
 ]
@@ -1855,7 +1856,7 @@ dependencies = [
 [[package]]
 name = "rhwp-jpeg-decoder"
 version = "0.3.2-rhwp.1"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "rayon",
 ]
@@ -1863,12 +1864,12 @@ dependencies = [
 [[package]]
 name = "rhwp-jpeg-encoder"
 version = "0.7.1-rhwp.1"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 
 [[package]]
 name = "rhwp-ooxml-chart"
 version = "0.1.0"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "quick-xml 0.42.0",
 ]
@@ -1876,7 +1877,7 @@ dependencies = [
 [[package]]
 name = "rhwp-password-crypto"
 version = "0.1.0"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -1897,7 +1898,7 @@ dependencies = [
 [[package]]
 name = "rhwp-pdf-import-backend"
 version = "0.3.78-rhwp.1"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "aes",
  "base64 0.23.1",
@@ -1946,7 +1947,7 @@ dependencies = [
 [[package]]
 name = "rhwp-svg2pdf"
 version = "0.13.0-rhwp.1"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "fontdb",
  "image",
@@ -1965,7 +1966,7 @@ dependencies = [
 [[package]]
 name = "rhwp-zune-jpeg"
 version = "0.5.15-rhwp.1"
-source = "git+https://github.com/edwardkim/rhwp?rev=4e690c93#4e690c930105fa09fef484787ed0a2e5e182d444"
+source = "git+https://github.com/physwkim/rhwp?rev=a9836a95#a9836a959015e9f4709d1b659994b7316f812289"
 dependencies = [
  "zune-core 0.5.3",
 ]
@@ -2233,14 +2234,16 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skera"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "531045338e36ad05b9652912a47ba38a935d0eaa0293c3e33d8112cfa414c14b"
+checksum = "1304685b8b275337200c0c138d8ca1b0b19be6185e4eb4013aebc9a1c270d761"
 dependencies = [
+ "foldhash",
  "hashbrown",
- "skrifa 0.48.0",
+ "read-fonts 0.46.0",
+ "skrifa 0.49.0",
  "thiserror",
- "write-fonts 0.54.1",
+ "write-fonts 0.55.0",
 ]
 
 [[package]]
@@ -2255,12 +2258,15 @@ dependencies = [
 
 [[package]]
 name = "skrifa"
-version = "0.48.0"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5213b4825bac3587046330052d61bfac7bd3bd0d203c758d7c2ef726fcea034"
+checksum = "a7459fb60888ad9a5f367dd293fa2fb9df142cb451aa6bfd6cd66a7d6a9b739d"
 dependencies = [
  "bytemuck",
- "read-fonts 0.45.1",
+ "once_cell",
+ "read-fonts 0.46.0",
+ "smallvec",
+ "yoke",
 ]
 
 [[package]]
@@ -2968,13 +2974,13 @@ dependencies = [
 
 [[package]]
 name = "write-fonts"
-version = "0.54.1"
+version = "0.55.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "55716cfa7e8bcdb90289e07dfac478ccb2e3ec0f9a604fe682c7a03a7984d705"
+checksum = "3e91ad74b39f48f456560ed1ccc75959efa19bf6f0817d1560751bb49db84f6c"
 dependencies = [
  "font-types 0.12.7",
  "log",
- "read-fonts 0.45.1",
+ "read-fonts 0.46.0",
 ]
 
 [[package]]
