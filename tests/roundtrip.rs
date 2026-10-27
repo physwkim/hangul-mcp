@@ -5138,6 +5138,148 @@ fn textbox_text_roundtrip() {
     }
 }
 
+/// 삽입 뒤에도 글상자 문단을 `cell {control, cell: 0}` 으로 편집하고, 목록·구조 도구가 그 위치를 알린다.
+#[test]
+fn textbox_edit_after_insert_roundtrip() {
+    let server = HangulMcp::new();
+    let (doc_id, _) = open(&server, &fixture("ref_text.hwpx"));
+    let (para, control) = insert_shape(
+        &server,
+        InsertShapeParams {
+            inline: Some(true),
+            text: Some("가나".to_string()),
+            ..shape_params(&doc_id, ShapeKind::Textbox, (60.0, 30.0))
+        },
+    )
+    .unwrap();
+    let tb = |cell_para| {
+        Some(CellTarget {
+            control,
+            cell: 0,
+            cell_para: Some(cell_para),
+        })
+    };
+    server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 2,
+            text: "다라마".to_string(),
+            cell: tb(0),
+        }))
+        .expect("insert_text (textbox)");
+    server
+        .split_paragraph(Parameters(SplitParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 3,
+            cell: tb(0),
+        }))
+        .expect("split_paragraph (textbox)");
+    server
+        .delete_text(Parameters(DeleteTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 1,
+            count: 1,
+            cell: tb(1),
+        }))
+        .expect("delete_text (textbox)");
+    server
+        .apply_char_format(Parameters(ApplyCharFormatParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            start: 0,
+            end: 1,
+            cell: tb(1),
+            format: CharFormat {
+                text_color: Some("#ff0000".to_string()),
+                ..CharFormat::default()
+            },
+        }))
+        .expect("apply_char_format (textbox)");
+    insert_hyperlink(
+        &server,
+        &doc_id,
+        (para, tb(0)),
+        (0, 2),
+        "https://example.com",
+    )
+    .expect("insert_hyperlink (textbox)");
+    let links = list_hyperlinks(&server, &doc_id);
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0]["cell"],
+        serde_json::json!({"control": control, "cell": 0, "cell_para": 0})
+    );
+    let structure: Value = serde_json::from_str(
+        &server
+            .get_structure(Parameters(DocIdParams {
+                doc_id: doc_id.clone(),
+            }))
+            .unwrap(),
+    )
+    .unwrap();
+    let objects = &structure["sections"][0]["paragraphs"][para]["objects"];
+    assert_eq!(objects[0]["textbox_paras"], 2, "{objects}");
+    assert!(server
+        .insert_text(Parameters(InsertTextParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            char_offset: 0,
+            text: "x".to_string(),
+            cell: Some(CellTarget {
+                control,
+                cell: 1,
+                cell_para: None,
+            }),
+        }))
+        .is_err());
+
+    for (ext, doc) in save_both(&server, &doc_id, "textbox_edit") {
+        let shape = single_shape(ext, &doc);
+        let paras = &shape
+            .drawing()
+            .unwrap()
+            .text_box
+            .as_ref()
+            .unwrap()
+            .paragraphs;
+        let texts: Vec<&str> = paras.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["가나다", "라"], "{ext}");
+        assert_eq!(
+            char_shape_at(&doc, &paras[1], 0).text_color,
+            RED_BGR,
+            "{ext}"
+        );
+    }
+    server
+        .merge_paragraph(Parameters(MergeParagraphParams {
+            doc_id: doc_id.clone(),
+            section: 0,
+            para,
+            cell: tb(1),
+        }))
+        .expect("merge_paragraph (textbox)");
+    let shape = save_both(&server, &doc_id, "textbox_merge");
+    for (ext, doc) in shape {
+        let paras = &single_shape(ext, &doc)
+            .drawing()
+            .unwrap()
+            .text_box
+            .as_ref()
+            .unwrap()
+            .paragraphs;
+        assert_eq!(paras.len(), 1, "{ext}");
+        assert_eq!(paras[0].text, "가나다라", "{ext}");
+    }
+}
+
 /// 가로 직선(높이 0): 조회 결과를 그대로 되먹여도 되고, 채우기와 0 으로 줄이기는 거부된다.
 #[test]
 fn line_shape_roundtrip() {

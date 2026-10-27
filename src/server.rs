@@ -22,8 +22,8 @@ use serde_json::{json, Value};
 
 use crate::cell_format::CellFormat;
 use crate::format::{
-    check_color, check_range, color_bgr, color_css, paragraph_at, CellTarget, CharFormat,
-    ParaFormat,
+    cell_containers, check_color, check_range, color_bgr, color_css, paragraph_at,
+    require_table_cell, textbox, CellTarget, CharFormat, ParaFormat,
 };
 use crate::page::{mm_to_hu, Columns, PageSetup, MAX_PAPER_MM};
 use crate::placement::{PictureFormat, ShapeFormat, TableFormat};
@@ -56,7 +56,7 @@ fn hwp_err(e: rhwp::HwpError) -> ErrorData {
     ErrorData::internal_error(e.to_string(), None)
 }
 
-/// 본문 문단, 또는 `cell` 이 있으면 그 표 셀 문단의 글자 수.
+/// 본문 문단, 또는 `cell` 이 있으면 그 표 셀·글상자 문단의 글자 수.
 fn para_len(
     core: &DocumentCore,
     section: usize,
@@ -71,7 +71,7 @@ fn para_len(
 
 /// rhwp 편집은 문단 길이를 넘는 char_offset 을 오류 없이 끝으로 당기거나 무시하므로,
 /// 위치를 받는 도구는 모두 편집 전에 `end <= 문단 길이` 를 이 검사로 확인한다.
-/// `cell` 이 있으면 그 표 셀 문단의 길이로 잰다.
+/// `cell` 이 있으면 그 표 셀·글상자 문단의 길이로 잰다.
 fn check_offset(
     core: &DocumentCore,
     section: usize,
@@ -354,7 +354,7 @@ fn link_markdown_images(
     Ok(md)
 }
 
-/// 본문 문단, 또는 그 문단 속 표 셀 문단의 주소. `cell` 은 (표 컨트롤, 셀, 셀 문단).
+/// 본문 문단, 또는 그 문단 속 표 셀·글상자 문단의 주소. `cell` 은 (컨트롤, 셀, 셀 문단).
 #[derive(Clone, Copy)]
 struct ParaLoc {
     section: usize,
@@ -394,7 +394,7 @@ impl ParaLoc {
     }
 }
 
-/// 문서 순서로 모든 본문 문단과 그 문단 속 표 셀 문단을 방문한다.
+/// 문서 순서로 모든 본문 문단과 그 문단 속 표 셀·글상자 문단을 방문한다.
 fn for_each_para(doc: &Document, mut f: impl FnMut(ParaLoc, &rhwp::model::paragraph::Paragraph)) {
     for (section, sec) in doc.sections.iter().enumerate() {
         for (para, p) in sec.paragraphs.iter().enumerate() {
@@ -407,19 +407,17 @@ fn for_each_para(doc: &Document, mut f: impl FnMut(ParaLoc, &rhwp::model::paragr
                 p,
             );
             for (ci, ctrl) in p.controls.iter().enumerate() {
-                if let Control::Table(t) = ctrl {
-                    for (cell_idx, cell) in t.cells.iter().enumerate() {
-                        for (cp, cell_para) in cell.paragraphs.iter().enumerate() {
-                            let cell = Some((ci, cell_idx, cp));
-                            f(
-                                ParaLoc {
-                                    section,
-                                    para,
-                                    cell,
-                                },
-                                cell_para,
-                            );
-                        }
+                for (cell_idx, paras) in cell_containers(ctrl).into_iter().enumerate() {
+                    for (cp, cell_para) in paras.iter().enumerate() {
+                        let cell = Some((ci, cell_idx, cp));
+                        f(
+                            ParaLoc {
+                                section,
+                                para,
+                                cell,
+                            },
+                            cell_para,
+                        );
                     }
                 }
             }
@@ -474,7 +472,7 @@ fn body_bookmark(doc: &Document, name: &str) -> Result<(usize, usize, usize), Er
             ci,
         )) => Ok((section, para, ci)),
         Some(_) => Err(ErrorData::invalid_params(
-            format!("책갈피 '{name}' 은 표 셀 안에 있어 바꿀 수 없다 (본문 책갈피만 지원)"),
+            format!("책갈피 '{name}' 은 표 셀·글상자 안에 있어 바꿀 수 없다 (본문 책갈피만 지원)"),
             None,
         )),
         None => Err(ErrorData::invalid_params(
@@ -484,7 +482,7 @@ fn body_bookmark(doc: &Document, name: &str) -> Result<(usize, usize, usize), Er
     }
 }
 
-/// 본문 문단, 또는 cell 이면 그 표 셀 문단의 수식.
+/// 본문 문단, 또는 cell 이면 그 표 셀·글상자 문단의 수식.
 fn equation_at<'a>(
     doc: &'a Document,
     section: usize,
@@ -639,7 +637,7 @@ fn shape_at(
     }
 }
 
-/// 본문 문단, 또는 cell 이면 그 표 셀 문단의 양식 개체.
+/// 본문 문단, 또는 cell 이면 그 표 셀·글상자 문단의 양식 개체.
 fn form_at<'a>(
     doc: &'a Document,
     section: usize,
@@ -761,7 +759,7 @@ pub struct InsertHyperlinkParams {
     pub section: usize,
     /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
     pub para: usize,
-    /// 표 셀 안 문단이면 그 셀
+    /// 표 셀·글상자 안 문단이면 그 셀
     pub cell: Option<CellTarget>,
     /// 링크를 걸 글자 범위 시작 (char 단위, 포함)
     pub start: usize,
@@ -779,7 +777,7 @@ pub struct HyperlinkAtParams {
     pub section: usize,
     /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
     pub para: usize,
-    /// 표 셀 안 문단이면 그 셀
+    /// 표 셀·글상자 안 문단이면 그 셀
     pub cell: Option<CellTarget>,
     /// list_hyperlinks 의 field_id
     pub field_id: u32,
@@ -793,7 +791,7 @@ pub struct UpdateHyperlinkParams {
     pub section: usize,
     /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
     pub para: usize,
-    /// 표 셀 안 문단이면 그 셀
+    /// 표 셀·글상자 안 문단이면 그 셀
     pub cell: Option<CellTarget>,
     /// list_hyperlinks 의 field_id
     pub field_id: u32,
@@ -829,7 +827,7 @@ pub struct EquationAtParams {
     pub section: usize,
     /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
     pub para: usize,
-    /// 표 셀 안 문단이면 그 셀
+    /// 표 셀·글상자 안 문단이면 그 셀
     pub cell: Option<CellTarget>,
     /// 문단(셀이면 셀 문단) 안 수식 컨트롤 인덱스
     pub control: usize,
@@ -843,7 +841,7 @@ pub struct SetEquationParams {
     pub section: usize,
     /// 본문 문단 인덱스 (cell 이 있으면 그 표가 속한 문단)
     pub para: usize,
-    /// 표 셀 안 문단이면 그 셀
+    /// 표 셀·글상자 안 문단이면 그 셀
     pub cell: Option<CellTarget>,
     /// 문단(셀이면 셀 문단) 안 수식 컨트롤 인덱스
     pub control: usize,
@@ -923,7 +921,7 @@ pub struct InsertTextParams {
     pub char_offset: usize,
     /// 삽입할 텍스트
     pub text: String,
-    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 편집한다 (para 는 표·글상자가 속한 문단)
     pub cell: Option<CellTarget>,
 }
 
@@ -939,7 +937,7 @@ pub struct DeleteTextParams {
     pub char_offset: usize,
     /// 삭제할 문자 수
     pub count: usize,
-    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 편집한다 (para 는 표·글상자가 속한 문단)
     pub cell: Option<CellTarget>,
 }
 
@@ -987,7 +985,7 @@ pub struct SplitParagraphParams {
     pub para: usize,
     /// 분할 지점 (char 단위)
     pub char_offset: usize,
-    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 편집한다 (para 는 표·글상자가 속한 문단)
     pub cell: Option<CellTarget>,
 }
 
@@ -999,7 +997,7 @@ pub struct MergeParagraphParams {
     pub section: usize,
     /// 이전 문단에 합칠 문단 인덱스 (cell 이면 표가 속한 문단, 합칠 셀 문단은 cell.cell_para ≥ 1)
     pub para: usize,
-    /// 지정하면 본문 대신 표 셀 문단을 편집한다 (para 는 표가 속한 문단)
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 편집한다 (para 는 표·글상자가 속한 문단)
     pub cell: Option<CellTarget>,
 }
 
@@ -1504,7 +1502,7 @@ pub struct ApplyCharFormatParams {
     pub start: usize,
     /// 서식 적용 끝 위치 (char 단위, 제외)
     pub end: usize,
-    /// 지정하면 본문 대신 표 셀 문단에 적용한다
+    /// 지정하면 본문 대신 표 셀·글상자 문단에 적용한다
     pub cell: Option<CellTarget>,
     /// 적용할 서식
     pub format: CharFormat,
@@ -1522,7 +1520,7 @@ pub struct GetCharFormatParams {
     pub start: Option<usize>,
     /// 조회 끝 위치 (char 단위, 제외, 생략 시 문단 끝)
     pub end: Option<usize>,
-    /// 지정하면 본문 대신 표 셀 문단을 조회한다
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 조회한다
     pub cell: Option<CellTarget>,
 }
 
@@ -1534,7 +1532,7 @@ pub struct ParaTargetParams {
     pub section: usize,
     /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
     pub para: usize,
-    /// 지정하면 본문 대신 표 셀 문단을 대상으로 한다
+    /// 지정하면 본문 대신 표 셀·글상자 문단을 대상으로 한다
     pub cell: Option<CellTarget>,
 }
 
@@ -1546,7 +1544,7 @@ pub struct ApplyParaFormatParams {
     pub section: usize,
     /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
     pub para: usize,
-    /// 지정하면 본문 대신 표 셀 문단에 적용한다
+    /// 지정하면 본문 대신 표 셀·글상자 문단에 적용한다
     pub cell: Option<CellTarget>,
     /// 적용할 문단 서식
     pub format: ParaFormat,
@@ -1568,7 +1566,7 @@ pub struct ApplyStyleParams {
     pub section: usize,
     /// 문단 인덱스 (cell을 지정하면 표가 속한 문단)
     pub para: usize,
-    /// 지정하면 본문 대신 표 셀 문단에 적용한다
+    /// 지정하면 본문 대신 표 셀·글상자 문단에 적용한다
     pub cell: Option<CellTarget>,
     /// 적용할 스타일 (id 숫자 또는 이름 문자열, 예: 3 또는 "개요 1")
     pub style: StyleRef,
@@ -1858,7 +1856,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문서의 책갈피를 문서 순서로 나열한다: name, section/para/control, char_offset (표 셀 안이면 cell)."
+        description = "문서의 책갈피를 문서 순서로 나열한다: name, section/para/control, char_offset (표 셀·글상자 안이면 cell)."
     )]
     pub fn list_bookmarks(
         &self,
@@ -1949,7 +1947,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문서의 하이퍼링크를 문서 순서로 나열한다: section/para(표 셀 안이면 cell), field_id, start/end(char 범위, end 제외), text, url."
+        description = "문서의 하이퍼링크를 문서 순서로 나열한다: section/para(표 셀·글상자 안이면 cell), field_id, start/end(char 범위, end 제외), text, url."
     )]
     pub fn list_hyperlinks(
         &self,
@@ -1981,7 +1979,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(표 셀 안이면 cell)의 글자 범위 start..end(end 제외, char 단위)에 웹 링크(http/https)를 건다. 글자와 서식은 그대로 둔다(파란 밑줄 등은 apply_char_format). 다른 필드와 겹치면 거부한다. 결과의 field_id 로 고치거나 지운다."
+        description = "문단(표 셀·글상자 안이면 cell)의 글자 범위 start..end(end 제외, char 단위)에 웹 링크(http/https)를 건다. 글자와 서식은 그대로 둔다(파란 밑줄 등은 apply_char_format). 다른 필드와 겹치면 거부한다. 결과의 field_id 로 고치거나 지운다."
     )]
     pub fn insert_hyperlink(
         &self,
@@ -2095,7 +2093,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "수식의 script, font_size_pt, color 를 반환한다 (표 셀 안이면 cell). 위치는 get_structure objects 로 파악한다."
+        description = "수식의 script, font_size_pt, color 를 반환한다 (표 셀·글상자 안이면 cell). 위치는 get_structure objects 로 파악한다."
     )]
     pub fn get_equation(
         &self,
@@ -2114,7 +2112,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "수식의 script / font_size_pt / color 를 바꾼다 (지정한 것만). 스크립트나 크기를 바꾸면 수식 크기가 다시 계산된다. 표 셀 안(cell)은 그 셀 문단의 첫 수식만 바꿀 수 있다."
+        description = "수식의 script / font_size_pt / color 를 바꾼다 (지정한 것만). 스크립트나 크기를 바꾸면 수식 크기가 다시 계산된다. 표 셀 안(cell)은 그 셀 문단의 첫 수식만 바꿀 수 있고, 글상자 안 수식은 거부한다(rhwp 미지원)."
     )]
     pub fn set_equation(
         &self,
@@ -2142,6 +2140,7 @@ impl HangulMcp {
         self.store.with_session_edit(&p.doc_id, |session| {
             let doc = session.core.document();
             equation_at(doc, p.section, p.para, p.cell.as_ref(), p.control)?;
+            require_table_cell(doc, p.section, p.para, p.cell.as_ref(), "수식")?;
             // rhwp 는 셀 문단에서 컨트롤 번호 없이 첫 수식을 고친다.
             let (table_ctrl, cell_idx, cell_para) = match &p.cell {
                 Some(c) => {
@@ -2233,7 +2232,7 @@ impl HangulMcp {
     // ── 읽기 ──
 
     #[tool(
-        description = "문서 구조를 반환한다: 구역별 문단 목록(인덱스, 텍스트 미리보기, 표 컨트롤, 개체 objects: 표/그림/도형/수식/각주/미주의 control·kind·char_offset). 편집 좌표(section/para/control)를 파악하는 시작점."
+        description = "문서 구조를 반환한다: 구역별 문단 목록(인덱스, 텍스트 미리보기, 표 컨트롤, 개체 objects: 표/그림/도형/수식/각주/미주의 control·kind·char_offset, 글상자 도형이면 textbox_paras — cell {control, cell: 0} 으로 편집). 편집 좌표(section/para/control)를 파악하는 시작점."
     )]
     pub fn get_structure(
         &self,
@@ -2274,11 +2273,17 @@ impl HangulMcp {
                                 .enumerate()
                                 .filter_map(|(ctrl_idx, (ctrl, pos))| {
                                     ObjectKind::of(ctrl).map(|kind| {
-                                        json!({
+                                        let mut obj = json!({
                                             "control": ctrl_idx,
                                             "kind": kind.name(),
                                             "char_offset": pos,
-                                        })
+                                        });
+                                        if let Control::Shape(shape) = ctrl {
+                                            if let Some(tb) = textbox(shape) {
+                                                obj["textbox_paras"] = json!(tb.paragraphs.len());
+                                            }
+                                        }
+                                        obj
                                     })
                                 })
                                 .collect();
@@ -2469,7 +2474,9 @@ impl HangulMcp {
 
     // ── 텍스트/문단 편집 ──
 
-    #[tool(description = "문단(또는 cell을 주면 표 셀 문단)의 지정 위치에 텍스트를 삽입한다.")]
+    #[tool(
+        description = "문단(또는 cell을 주면 표 셀·글상자 문단)의 지정 위치에 텍스트를 삽입한다."
+    )]
     pub fn insert_text(
         &self,
         Parameters(p): Parameters<InsertTextParams>,
@@ -2503,7 +2510,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 cell을 주면 표 셀 문단)의 지정 위치부터 count자의 텍스트를 삭제한다."
+        description = "문단(또는 cell을 주면 표 셀·글상자 문단)의 지정 위치부터 count자의 텍스트를 삭제한다."
     )]
     pub fn delete_text(
         &self,
@@ -2571,7 +2578,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 cell을 주면 표 셀 문단)을 char_offset 지점에서 두 문단으로 분할한다."
+        description = "문단(또는 cell을 주면 표 셀·글상자 문단)을 char_offset 지점에서 두 문단으로 분할한다."
     )]
     pub fn split_paragraph(
         &self,
@@ -2642,7 +2649,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)의 [start, end) 범위에 글자 서식을 적용한다. 색, 진하게/기울임/밑줄/취소선, 크기, 글꼴, 음영, 그림자, 위/아래첨자, 장평/자간 등. format에 지정한 항목만 바뀐다."
+        description = "문단(또는 표 셀·글상자 문단)의 [start, end) 범위에 글자 서식을 적용한다. 색, 진하게/기울임/밑줄/취소선, 크기, 글꼴, 음영, 그림자, 위/아래첨자, 장평/자간 등. format에 지정한 항목만 바뀐다."
     )]
     pub fn apply_char_format(
         &self,
@@ -2680,7 +2687,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)의 글자 서식을 조회한다. [start, end) 범위를 서식이 같은 구간(runs)으로 나눠 각 구간의 서식을 apply_char_format의 format과 같은 형태로 돌려준다."
+        description = "문단(또는 표 셀·글상자 문단)의 글자 서식을 조회한다. [start, end) 범위를 서식이 같은 구간(runs)으로 나눠 각 구간의 서식을 apply_char_format의 format과 같은 형태로 돌려준다."
     )]
     pub fn get_char_format(
         &self,
@@ -2723,7 +2730,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)의 문단 서식(정렬, 줄 간격, 여백, 들여쓰기, 문단 간격, 줄 나눔 등)을 apply_para_format의 format과 같은 형태로 조회한다. 문단에 적용된 스타일과 개요/번호 머리(heading: type None/Outline/Number/Bullet, level 1~7)도 함께 돌려준다."
+        description = "문단(또는 표 셀·글상자 문단)의 문단 서식(정렬, 줄 간격, 여백, 들여쓰기, 문단 간격, 줄 나눔 등)을 apply_para_format의 format과 같은 형태로 조회한다. 문단에 적용된 스타일과 개요/번호 머리(heading: type None/Outline/Number/Bullet, level 1~7)도 함께 돌려준다."
     )]
     pub fn get_para_format(
         &self,
@@ -2755,7 +2762,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)에 문단 서식을 적용한다. 정렬, 줄 간격(%/pt), 왼쪽·오른쪽 여백, 첫 줄 들여쓰기/내어쓰기, 문단 위·아래 간격, 다음 문단과 함께, 문단 보호, 쪽 나눔, 줄 나눔 단위. format에 지정한 항목만 바뀐다."
+        description = "문단(또는 표 셀·글상자 문단)에 문단 서식을 적용한다. 정렬, 줄 간격(%/pt), 왼쪽·오른쪽 여백, 첫 줄 들여쓰기/내어쓰기, 문단 위·아래 간격, 다음 문단과 함께, 문단 보호, 쪽 나눔, 줄 나눔 단위. format에 지정한 항목만 바뀐다."
     )]
     pub fn apply_para_format(
         &self,
@@ -2807,7 +2814,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "문단(또는 표 셀 문단)에 스타일을 적용한다. style은 list_styles의 id 또는 이름. 문단 스타일은 문단 모양과 글자 모양을, 글자 스타일은 문단 전체 글자 모양을 바꾼다. 문단에 직접 준 문단 서식(스타일과 다른 문단 모양)이 있으면 그 문단 모양은 유지되고, 직접 준 글자 서식도 유지된다."
+        description = "문단(또는 표 셀·글상자 문단)에 스타일을 적용한다. style은 list_styles의 id 또는 이름. 문단 스타일은 문단 모양과 글자 모양을, 글자 스타일은 문단 전체 글자 모양을 바꾼다. 문단에 직접 준 문단 서식(스타일과 다른 문단 모양)이 있으면 그 문단 모양은 유지되고, 직접 준 글자 서식도 유지된다."
     )]
     pub fn apply_style(
         &self,
@@ -3771,7 +3778,7 @@ impl HangulMcp {
     // ── 양식 개체(폼) ──
 
     #[tool(
-        description = "문서의 모든 양식 개체(버튼/체크박스/라디오/콤보박스/에디트)를 목록으로 반환한다: 위치(section/para/control, 표 셀 안이면 cell), 종류, 이름, 값, 캡션, 텍스트. 폼을 채우기 전 좌표를 파악하는 시작점."
+        description = "문서의 모든 양식 개체(버튼/체크박스/라디오/콤보박스/에디트)를 목록으로 반환한다: 위치(section/para/control, 표 셀·글상자 안이면 cell), 종류, 이름, 값, 캡션, 텍스트. 폼을 채우기 전 좌표를 파악하는 시작점."
     )]
     pub fn list_forms(&self, Parameters(p): Parameters<DocIdParams>) -> Result<String, ErrorData> {
         self.store.with_session(&p.doc_id, |session| {
@@ -3796,7 +3803,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "양식 개체의 현재 값을 조회한다 (종류/이름/값/텍스트/캡션/활성). 위치(section/para/control, 표 셀 안이면 cell)는 list_forms로 파악한다."
+        description = "양식 개체의 현재 값을 조회한다 (종류/이름/값/텍스트/캡션/활성). 위치(section/para/control, 표 셀·글상자 안이면 cell)는 list_forms로 파악한다."
     )]
     pub fn get_form_value(
         &self,
@@ -3860,7 +3867,7 @@ impl HangulMcp {
     }
 
     #[tool(
-        description = "양식 개체의 값을 설정한다. value(체크 상태 0/1), text(콤보 선택값·에디트 입력값), caption(버튼 라벨) 중 최소 하나를 지정한다. 위치(section/para/control, 표 셀 안이면 cell)는 list_forms로 파악한다."
+        description = "양식 개체의 값을 설정한다. value(체크 상태 0/1), text(콤보 선택값·에디트 입력값), caption(버튼 라벨) 중 최소 하나를 지정한다. 위치(section/para/control, 표 셀·글상자 안이면 cell)는 list_forms로 파악한다."
     )]
     pub fn set_form_value(
         &self,
@@ -3885,13 +3892,9 @@ impl HangulMcp {
         let value_json = serde_json::Value::Object(obj).to_string();
         self.store.with_session_edit(&p.doc_id, |session| {
             // 네이티브는 폼이 아니어도 Ok({"ok":false})를 돌려주므로 위치를 먼저 확인한다.
-            form_at(
-                session.core.document(),
-                p.section,
-                p.para,
-                p.cell.as_ref(),
-                p.control,
-            )?;
+            let doc = session.core.document();
+            form_at(doc, p.section, p.para, p.cell.as_ref(), p.control)?;
+            require_table_cell(doc, p.section, p.para, p.cell.as_ref(), "양식 개체")?;
             match p.cell.as_ref() {
                 Some(c) => session.core.set_form_value_in_cell_native(
                     p.section,

@@ -11,6 +11,7 @@
 use rhwp::model::control::Control;
 use rhwp::model::document::Document;
 use rhwp::model::paragraph::Paragraph;
+use rhwp::model::shape::{ShapeObject, TextBox};
 use rhwp::model::style::{
     Alignment as RAlignment, CharShape, LineSpacingType as RLineSpacingType, ParaShape,
     UnderlineType as RUnderlineType,
@@ -28,11 +29,11 @@ const CHAR_SIZE_UNITS_PER_PT: f64 = 100.0;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct CellTarget {
-    /// 표가 속한 문단의 컨트롤 인덱스 (get_structure의 table control 값)
+    /// 표 또는 글상자 도형이 속한 문단의 컨트롤 인덱스 (get_structure 의 tables/objects control 값)
     pub control: usize,
-    /// 셀 평면 인덱스 (get_table의 cell_idx)
+    /// 표면 셀 평면 인덱스 (get_table의 cell_idx), 글상자면 0
     pub cell: usize,
-    /// 셀 내 문단 인덱스 (생략 시 0)
+    /// 셀(글상자) 내 문단 인덱스 (생략 시 0)
     pub cell_para: Option<usize>,
 }
 
@@ -42,7 +43,31 @@ impl CellTarget {
     }
 }
 
-/// 본문 문단, 또는 `cell` 이 있으면 (section, para) 문단의 표 셀 안 문단을 찾는다.
+/// 컨트롤 하나가 품은 셀 문단 묶음들 — 표는 셀마다 하나, 글상자가 있는 도형은 cell 0 하나.
+/// `CellTarget` 이 가리킬 수 있는 곳은 정확히 이 집합이고(rhwp 셀 문단 native 가 받는
+/// 표 셀·글상자와 같다), `paragraph_at` 과 문서 순회가 모두 이것으로 찾는다.
+pub fn cell_containers(ctrl: &Control) -> Vec<&[Paragraph]> {
+    match ctrl {
+        Control::Table(t) => t.cells.iter().map(|c| c.paragraphs.as_slice()).collect(),
+        Control::Shape(shape) => textbox(shape)
+            .map(|tb| vec![tb.paragraphs.as_slice()])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// 글상자 — rhwp `get_textbox_from_shape` 와 같은 갈래만 본다.
+pub fn textbox(shape: &ShapeObject) -> Option<&TextBox> {
+    match shape {
+        ShapeObject::Rectangle(s) => s.drawing.text_box.as_ref(),
+        ShapeObject::Ellipse(s) => s.drawing.text_box.as_ref(),
+        ShapeObject::Polygon(s) => s.drawing.text_box.as_ref(),
+        ShapeObject::Curve(s) => s.drawing.text_box.as_ref(),
+        _ => None,
+    }
+}
+
+/// 본문 문단, 또는 `cell` 이 있으면 (section, para) 문단의 표 셀·글상자 안 문단을 찾는다.
 pub fn paragraph_at<'a>(
     doc: &'a Document,
     section: usize,
@@ -60,19 +85,47 @@ pub fn paragraph_at<'a>(
     let Some(c) = cell else {
         return Ok(p);
     };
-    let Some(Control::Table(table)) = p.controls.get(c.control) else {
+    let containers = p
+        .controls
+        .get(c.control)
+        .map(cell_containers)
+        .unwrap_or_default();
+    if containers.is_empty() {
         return Err(not_found(format!(
-            "문단 {section}/{para} 의 컨트롤 {} 은 표가 아니다",
+            "문단 {section}/{para} 의 컨트롤 {} 은 표나 글상자가 아니다",
             c.control
         )));
-    };
-    table
-        .cells
+    }
+    containers
         .get(c.cell)
-        .ok_or_else(|| not_found(format!("셀 {} 이 없다", c.cell)))?
-        .paragraphs
+        .ok_or_else(|| not_found(format!("셀 {} 이 없다 (글상자는 cell 0)", c.cell)))?
         .get(c.cell_para())
         .ok_or_else(|| not_found(format!("셀 {} 의 문단 {} 이 없다", c.cell, c.cell_para())))
+}
+
+/// `cell` 이 표 셀을 가리키는지(본문이면 통과). 표 셀만 받는 rhwp native(셀 양식 값,
+/// 셀 수식 속성) 앞에서 글상자를 거부한다 — 양식 native 는 표가 아니면 `ok:false` 로 조용히 끝난다.
+pub fn require_table_cell(
+    doc: &Document,
+    section: usize,
+    para: usize,
+    cell: Option<&CellTarget>,
+    what: &str,
+) -> Result<(), ErrorData> {
+    paragraph_at(doc, section, para, cell)?;
+    match cell {
+        Some(c)
+            if !matches!(
+                doc.sections[section].paragraphs[para].controls[c.control],
+                Control::Table(_)
+            ) =>
+        {
+            Err(invalid(format!(
+                "글상자 안 {what} 은(는) 바꿀 수 없다 (표 셀만 지원)"
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn invalid(msg: String) -> ErrorData {
@@ -713,5 +766,55 @@ impl ParaFormat {
                 _ => EnglishBreakUnit::Char,
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 표 셀 대상은 통과하고, 글상자 대상은 표 셀 전용 native 앞에서 거부된다.
+    #[test]
+    fn require_table_cell_rejects_textbox() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/ref_table.hwpx");
+        let mut core = DocumentCore::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        core.create_shape_control_native(
+            0,
+            0,
+            0,
+            6000,
+            3000,
+            0,
+            0,
+            true,
+            "InFrontOfText",
+            "textbox",
+            false,
+            false,
+            &[],
+        )
+        .unwrap();
+        let doc = core.document();
+        let find = |pred: fn(&Control) -> bool| {
+            doc.sections[0]
+                .paragraphs
+                .iter()
+                .enumerate()
+                .find_map(|(i, p)| p.controls.iter().position(pred).map(|ci| (i, ci)))
+                .unwrap()
+        };
+        let table = find(|c| matches!(c, Control::Table(_)));
+        let shape = find(|c| matches!(c, Control::Shape(_)));
+        let check = |(para, control)| {
+            let target = CellTarget {
+                control,
+                cell: 0,
+                cell_para: None,
+            };
+            paragraph_at(doc, 0, para, Some(&target)).expect("셀 문단 해석");
+            require_table_cell(doc, 0, para, Some(&target), "수식")
+        };
+        assert!(check(table).is_ok());
+        assert!(check(shape).is_err());
     }
 }
