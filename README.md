@@ -222,7 +222,6 @@ first cell paragraph that holds one). `biz_plan.hwp` is a Hancom-written HWP 5.0
 
 ## Out of scope (possible follow-ups)
 
-- Formatting (char/para format, styles), headers and footers, footnotes, HTML import —
-  rhwp's `DocumentCore` already has the APIs, so only the tools are missing
-- Saving as HWP 5.0 (`export_hwp_with_adapter`), PDF export
+- HTML import — rhwp's `DocumentCore` already has the API, so only the tool is missing
+- Shape groups, charts and OLE objects (`get/apply_shape_format` take single drawing objects only)
 - Batched edit optimization (`begin_batch_native` / `end_batch_native`)
